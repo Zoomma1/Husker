@@ -1,7 +1,7 @@
+use axum::{routing::get, Json, Router};
 use serde::Serialize;
-use axum::{Router, Json, routing::get, };
-use tokio::net::TcpListener;
 use sqlx::SqlitePool;
+use tokio::net::TcpListener;
 
 #[derive(Serialize)]
 struct PingResponse {
@@ -15,16 +15,18 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let app = app();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     use sqlx::sqlite::SqliteConnectOptions;
     use std::str::FromStr;
     let options = SqliteConnectOptions::from_str(&database_url)
         .expect("Invalid DATABASE_URL")
         .create_if_missing(true);
-    let pool = SqlitePool::connect_with(options).await
+    let pool = SqlitePool::connect_with(options)
+        .await
         .expect("Failed to connect to DB");
-    sqlx::migrate!().run(&pool).await
+    sqlx::migrate!()
+        .run(&pool)
+        .await
         .expect("Failed to run migrations");
 
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
@@ -33,23 +35,23 @@ async fn main() {
 }
 
 fn app() -> Router {
-    Router::new()
-        .route("/ping", get(ping))
+    Router::new().route("/ping", get(ping))
 }
 
 async fn ping() -> Json<PingResponse> {
     PingResponse {
         status: "ok".to_string(),
-    }.into()
+    }
+    .into()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-    use axum::{http, body::Body};
-    use sqlx::sqlite::SqliteConnectOptions;
-    use tower::ServiceExt;
     use super::*;
+    use axum::{body::Body, http};
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+    use tower::ServiceExt;
     #[tokio::test]
     async fn test_ping() {
         let app = app();
@@ -61,10 +63,11 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), 200);
 
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), "{\"status\":\"ok\"}");
     }
-
 
     #[cfg(test)]
     async fn test_pool() -> SqlitePool {
