@@ -1,3 +1,5 @@
+mod errors;
+
 use axum::{routing::get, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -30,7 +32,16 @@ async fn main() {
         .expect("Failed to run migrations");
 
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
-    println!("Listening on port {port}");
+
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    tracing::info!("Starting Husker on port {port}");
+    
     axum::serve(listener, app).await.unwrap();
 }
 
