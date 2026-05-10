@@ -1,9 +1,14 @@
 mod errors;
+mod docker;
+mod state;
+mod routes;
 
-use axum::{routing::get, Json, Router};
+use axum::{routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::net::TcpListener;
+use bollard::Docker;
+use crate::state::AppState;
 
 #[derive(Serialize)]
 struct PingResponse {
@@ -13,13 +18,12 @@ struct PingResponse {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let app = app();
-
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     use sqlx::sqlite::SqliteConnectOptions;
     use std::str::FromStr;
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let options = SqliteConnectOptions::from_str(&database_url)
         .expect("Invalid DATABASE_URL")
         .create_if_missing(true);
@@ -41,12 +45,24 @@ async fn main() {
         .init();
 
     tracing::info!("Starting Husker on port {port}");
+
+    let docker = Docker::connect_with_local_defaults().unwrap();
+
+    let state = AppState {
+        pool,
+        docker,
+    };
+    let app = app(state);
     
     axum::serve(listener, app).await.unwrap();
 }
 
-fn app() -> Router {
-    Router::new().route("/ping", get(ping))
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/ping", get(ping))
+        .route("/api/projects", post(routes::projects::create_project).get(routes::projects::list_projects))
+        .route("/api/projects/{id}", get(routes::projects::get_project).delete(routes::projects::delete_project))
+        .with_state(state)
 }
 
 async fn ping() -> Json<PingResponse> {
@@ -65,7 +81,11 @@ mod tests {
     use tower::ServiceExt;
     #[tokio::test]
     async fn test_ping() {
-        let app = app();
+        let state = AppState {
+            pool: test_pool().await,
+            docker: Docker::connect_with_local_defaults().unwrap(),
+        };
+        let app = app(state);
         let request = http::request::Request::builder()
             .uri("/ping")
             .body(Body::empty())

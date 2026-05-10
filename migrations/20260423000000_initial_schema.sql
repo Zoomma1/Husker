@@ -1,12 +1,12 @@
 CREATE TABLE projects (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY NOT NULL,
     name TEXT NOT NULL UNIQUE,
     network_name TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL
 );
 
 CREATE TABLE apps (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY NOT NULL ,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     name TEXT NOT NULL,
     git_url TEXT NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE apps (
 );
 
 CREATE TABLE env_vars (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY NOT NULL ,
     app_id INTEGER NOT NULL REFERENCES apps(id),
     key TEXT NOT NULL,
     value TEXT NOT NULL,  -- plain text au MVP → chiffré plus tard
@@ -30,7 +30,7 @@ CREATE TABLE env_vars (
 );
 
 CREATE TABLE deployments (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY NOT NULL ,
     app_id INTEGER NOT NULL REFERENCES apps(id),
     git_sha TEXT,
     status TEXT NOT NULL,  -- building | success | failed

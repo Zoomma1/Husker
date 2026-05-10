@@ -13,6 +13,9 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-native-tls", "mac
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bollard = "0.20.2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

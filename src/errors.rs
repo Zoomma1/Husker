@@ -14,6 +14,9 @@ pub enum AppError {
 
     #[error("Internal error")]
     Internal,
+
+    #[error("Docker error: {0}")]
+    Docker(#[from] bollard::errors::Error),
 }
 
 #[derive(Serialize)]
@@ -28,6 +31,7 @@ impl IntoResponse for AppError {
             AppError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Docker(_) => StatusCode::BAD_GATEWAY,
         };
 
         let body = Json(ErrorBody {
@@ -59,5 +63,15 @@ mod tests {
     fn test_internal_returns_500() {
         let response = AppError::Internal.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_docker_unavailable_returns_502() {
+        let err = AppError::Docker(bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "Docker is down".to_string(),
+        });
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 }
