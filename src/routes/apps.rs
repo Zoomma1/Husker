@@ -141,5 +141,40 @@ pub async fn get_app(
     }
 }
 
+pub async fn delete_app(
+    Path((project_id, app_id)): Path<(i64, i64)>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, AppError> {
+    let project = sqlx::query_as!(
+        Project,
+        "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
+        project_id
+    ).fetch_optional(&state.pool).await?;
+
+    if project.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    let app = sqlx::query_as!(
+        App,
+        "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
+         FROM apps WHERE id = ? AND project_id = ?",
+        app_id,
+        project_id
+    ).fetch_optional(&state.pool).await?;
+
+    if app.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query!(
+        "DELETE FROM apps WHERE id = ? AND project_id = ?",
+        app_id,
+        project_id
+    ).execute(&state.pool).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests;

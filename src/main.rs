@@ -62,6 +62,8 @@ fn app(state: AppState) -> Router {
         .route("/ping", get(ping))
         .route("/api/projects", post(routes::projects::create_project).get(routes::projects::list_projects))
         .route("/api/projects/{id}", get(routes::projects::get_project).delete(routes::projects::delete_project))
+        .route("/api/projects/{id}/apps", post(routes::apps::create_app).get(routes::apps::list_apps))
+        .route("/api/projects/{id}/apps/{app_id}", get(routes::apps::get_app).delete(routes::apps::delete_app))
         .with_state(state)
 }
 
