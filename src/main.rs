@@ -64,7 +64,8 @@ fn app(state: AppState) -> Router {
         .route("/api/projects/{id}", get(routes::projects::get_project).delete(routes::projects::delete_project))
         .route("/api/projects/{id}/apps", post(routes::apps::create_app).get(routes::apps::list_apps))
         .route("/api/projects/{id}/apps/{app_id}", get(routes::apps::get_app).delete(routes::apps::delete_app))
-        .route("/api/projects/{id}/apps/{app_id}/env", post(routes::env_vars::create_env))
+        .route("/api/projects/{id}/apps/{app_id}/env", post(routes::env_vars::create_env).get(routes::env_vars::list_env))
+        .route("/api/projects/{id}/apps/{app_id}/env/{key}", get(routes::env_vars::get_env).delete(routes::env_vars::delete_env))
         .with_state(state)
 }
 
