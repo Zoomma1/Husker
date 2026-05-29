@@ -12,11 +12,14 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    #[error("Internal error")]
-    Internal,
-
     #[error("Docker error: {0}")]
     Docker(#[from] bollard::errors::Error),
+
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 #[derive(Serialize)]
@@ -30,8 +33,9 @@ impl IntoResponse for AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Docker(_) => StatusCode::BAD_GATEWAY,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
         };
 
         let body = Json(ErrorBody {
@@ -60,12 +64,6 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_returns_500() {
-        let response = AppError::Internal.into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
     fn test_docker_unavailable_returns_502() {
         let err = AppError::Docker(bollard::errors::Error::DockerResponseServerError {
             status_code: 500,
@@ -73,5 +71,17 @@ mod tests {
         });
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_bad_request_returns_400() {
+        let response = AppError::BadRequest("Invalid input".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_conflict_returns_409() {
+        let response = AppError::Conflict("Resource already exists".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

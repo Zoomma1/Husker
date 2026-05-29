@@ -1,5 +1,5 @@
 use bollard::Docker;
-
+#[allow(dead_code)] // TODO HUSKER-XX : wire au startup (healthcheck Docker avant axum::serve)
 pub async fn ping_daemon(docker: &Docker) -> Result<(), bollard::errors::Error> {
     docker.ping().await?;
     Ok(())
