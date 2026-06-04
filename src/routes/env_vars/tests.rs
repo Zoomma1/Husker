@@ -230,7 +230,7 @@ async fn create_env_var_duplicate_key_returns_409() {
         .body(axum::body::Body::from(body))
         .unwrap();
 
-    let response = app.clone().oneshot(request).await.unwrap();
+    let _response = app.clone().oneshot(request).await.unwrap();
 
     let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
@@ -247,8 +247,6 @@ async fn create_env_var_duplicate_key_returns_409() {
 #[tokio::test]
 async fn create_env_var_app_not_found_returns_404() {
     let suffix = uuid::Uuid::new_v4().to_string();
-    let app_name = format!("app_test_{}", &suffix[..8]);
-    let expected_git_url = format!("https://github.com/user/{}", &suffix[..8]);
     let expected_database_url = format!("postgres://user:password@localhost/{}", &suffix[..8]);
     let docker = Docker::connect_with_local_defaults().unwrap();
     let pool = crate::routes::env_vars::tests::make_test_pool().await;

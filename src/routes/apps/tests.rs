@@ -195,7 +195,6 @@ async fn test_list_apps_project_not_found() {
 
 #[tokio::test]
 async fn test_list_apps_empty_project() {
-    let suffix = uuid::Uuid::new_v4().to_string();
     let docker = Docker::connect_with_local_defaults().unwrap();
     let pool = make_test_pool().await;
     let created_at = chrono::Utc::now().to_rfc3339();
