@@ -2,6 +2,7 @@ mod errors;
 mod docker;
 mod state;
 mod routes;
+mod extractors;
 
 use axum::{routing::get, routing::post, Json, Router};
 use serde::Serialize;

@@ -16,6 +16,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bollard = "0.20.2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

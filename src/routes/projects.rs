@@ -1,12 +1,15 @@
 use axum::{extract::{State, Path}, Json};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 use crate::state::AppState;
 use crate::errors::AppError;
+use crate::extractors::{non_blank, ValidatedJson};
 use crate::docker;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateProjectRequest {
+    #[validate(custom(function = "non_blank"))]
     pub name: String,
 }
 
@@ -20,11 +23,8 @@ pub struct Project {
 
 pub async fn create_project(
     State(state): State<AppState>,
-    Json(payload): Json<CreateProjectRequest>,
+    ValidatedJson(payload): ValidatedJson<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
-    if payload.name.trim().is_empty() {
-        return Err(AppError::Validation("name cannot be empty".into()));
-    }
     let existing = sqlx::query!(
         "SELECT id FROM projects WHERE name = ?",
         payload.name

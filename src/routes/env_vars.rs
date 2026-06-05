@@ -2,15 +2,29 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationError};
 use crate::errors::AppError;
+use crate::extractors::ValidatedJson;
 use crate::routes::apps::App;
 use crate::routes::projects::Project;
 use crate::state::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateEnvVarRequest {
+    #[validate(custom(function = "valid_env_key"))]
     pub key: String,
     pub value: String,
+}
+
+/// Clé d'env : non vide, et uniquement lettres / chiffres / underscore.
+fn valid_env_key(key: &str) -> Result<(), ValidationError> {
+    if key.trim().is_empty() {
+        return Err(ValidationError::new("env_key_blank"));
+    }
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(ValidationError::new("env_key_charset"));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize, sqlx::FromRow)]
@@ -24,16 +38,8 @@ pub struct EnvVar {
 pub async fn create_env(
     Path((project_id, app_id)): Path<(i64, i64)>,
     State(state): State<AppState>,
-    Json(payload): Json<CreateEnvVarRequest>,
+    ValidatedJson(payload): ValidatedJson<CreateEnvVarRequest>,
 ) -> Result<(StatusCode, Json<EnvVar>), AppError> {
-    if payload.key.trim().is_empty() {
-        return Err(AppError::BadRequest("key cannot be empty".into()));
-    }
-
-    if !payload.key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(AppError::BadRequest("key can only contain letters, numbers, and underscores".into()));
-    }
-
     let project = sqlx::query_as!(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",

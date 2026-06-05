@@ -2,12 +2,15 @@ use axum::extract::{State, Path};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 use crate::errors::AppError;
+use crate::extractors::{non_blank, ValidatedJson};
 use crate::routes::projects::Project;
 use crate::state::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateAppRequest {
+    #[validate(custom(function = "non_blank"))]
     pub name: String,
     pub git_url: String,
     #[serde(default = "default_git_branch")]
@@ -45,12 +48,8 @@ fn default_dockerfile_path() -> String {
 pub async fn create_app(
     Path(project_id): Path<i64>,
     State(state): State<AppState>,
-    Json(payload): Json<CreateAppRequest>,
+    ValidatedJson(payload): ValidatedJson<CreateAppRequest>,
 ) -> Result<(StatusCode, Json<App>), AppError> {
-    if payload.name.trim().is_empty() {
-        return Err(AppError::Validation("name cannot be empty".into()));
-    }
-
     let project = sqlx::query_as!(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",

@@ -94,7 +94,7 @@ async fn create_env_var_happy_path() {
 }
 
 #[tokio::test]
-async fn create_env_var_empty_key_returns_400() {
+async fn create_env_var_empty_key_returns_422() {
     let suffix = uuid::Uuid::new_v4().to_string();
     let app_name = format!("app_test_{}", &suffix[..8]);
     let expected_git_url = format!("https://github.com/user/{}", &suffix[..8]);
@@ -137,11 +137,11 @@ async fn create_env_var_empty_key_returns_400() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), 422);
 }
 
 #[tokio::test]
-async fn create_env_var_invalid_key_returns_400() {
+async fn create_env_var_invalid_key_returns_422() {
     let suffix = uuid::Uuid::new_v4().to_string();
     let app_name = format!("app_test_{}", &suffix[..8]);
     let expected_git_url = format!("https://github.com/user/{}", &suffix[..8]);
@@ -184,7 +184,7 @@ async fn create_env_var_invalid_key_returns_400() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), 422);
 }
 
 #[tokio::test]
