@@ -13,11 +13,14 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-native-tls", "mac
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bollard = "0.20.2"
+bollard = { version = "0.20.2", features = ["buildkit", "chrono", "buildkit_providerless"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 validator = { version = "0.20", features = ["derive"] }
 git2 = "0.20"
+tar = "0.4"
+flate2 = "1"
+futures-util = "0.3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
