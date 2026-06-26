@@ -334,3 +334,19 @@ async fn test_delete_app_project_not_found() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 404);
 }
+
+#[tokio::test]
+async fn test_deploy_app_not_found() {
+    // Mapping HTTP de la route flat : app inconnue -> 404 (deploy() -> NotFound -> into_response).
+    // Pas d'I/O git/docker (l'orchestrateur retourne avant).
+    let ctx = TestApp::new().await;
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/api/apps/9999999/deploy")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = ctx.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 404);
+}

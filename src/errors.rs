@@ -15,6 +15,12 @@ pub enum AppError {
     #[error("Docker error: {0}")]
     Docker(#[from] bollard::errors::Error),
 
+    #[error("Git error: {0}")]
+    Git(String),
+
+    #[error("Deploy error: {0}")]
+    Deploy(String),
+
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -34,6 +40,8 @@ impl IntoResponse for AppError {
             AppError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Docker(_) => StatusCode::BAD_GATEWAY,
+            AppError::Git(_) => StatusCode::BAD_GATEWAY,
+            AppError::Deploy(_) => StatusCode::BAD_GATEWAY,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
         };
@@ -70,6 +78,18 @@ mod tests {
             message: "Docker is down".to_string(),
         });
         let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_git_returns_502() {
+        let response = AppError::Git("clone failed: invalid url".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_deploy_returns_502() {
+        let response = AppError::Deploy("orchestration failed".to_string()).into_response();
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 

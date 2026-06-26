@@ -175,5 +175,16 @@ pub async fn delete_app(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/apps/{id}/deploy` — route flat (dérogation au nested CRUD, cf. refine).
+/// Orchestration synchrone `git → build → run` ; 404 si l'app n'existe pas,
+/// 502 sur échec git/docker (via `AppError`). Renvoie l'app à jour (status `running`).
+pub async fn deploy_app(
+    Path(app_id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<Json<App>, AppError> {
+    let app = crate::deploy::deploy(&state, app_id).await?;
+    Ok(Json(app))
+}
+
 #[cfg(test)]
 mod tests;
