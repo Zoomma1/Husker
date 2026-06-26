@@ -3,6 +3,7 @@ mod docker;
 mod state;
 mod routes;
 mod extractors;
+mod deploy;
 
 use axum::{routing::get, routing::post, Json, Router};
 use serde::Serialize;
@@ -67,6 +68,7 @@ fn app(state: AppState) -> Router {
         .route("/api/projects/{id}/apps/{app_id}", get(routes::apps::get_app).delete(routes::apps::delete_app))
         .route("/api/projects/{id}/apps/{app_id}/env", post(routes::env_vars::create_env).get(routes::env_vars::list_env))
         .route("/api/projects/{id}/apps/{app_id}/env/{key}", get(routes::env_vars::get_env).delete(routes::env_vars::delete_env))
+        .route("/api/apps/{id}/deploy", post(routes::apps::deploy_app))
         .with_state(state)
 }
 
