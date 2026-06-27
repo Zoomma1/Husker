@@ -7,13 +7,21 @@
 //! poser une précondition sans effet de bord Docker (réseau).
 
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use axum::Router;
 use bollard::Docker;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
 
 use crate::state::AppState;
+
+/// Sérialise les tests qui mutent les variables d'env de roots (`HUSKER_SOURCES_ROOT` /
+/// `HUSKER_DATA_ROOT`), globales au process — sinon races en `cargo test -- --ignored`
+/// (multi-thread). Partagé entre les E2E deploy/lifecycle (`deploy.rs`) et la pipeline
+/// E2E (`pipeline_e2e.rs`). Mutex tokio : le guard peut être tenu à travers un await.
+pub(crate) static ENV_ROOTS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub(crate) struct TestApp {
     pub router: Router,

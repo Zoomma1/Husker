@@ -116,13 +116,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::LazyLock;
-    use tokio::sync::Mutex;
 
-    /// Les tests d'intégration deploy posent des roots via variables d'env de process
-    /// (globales) → on les sérialise pour éviter les races (`cargo test -- --ignored`
-    /// est multi-thread). Mutex tokio (async) : son guard peut être tenu à travers un await.
-    static DEPLOY_IT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    // Lock de sérialisation des roots (process-global), partagé avec la pipeline E2E.
+    use crate::routes::test_routes_helpers::ENV_ROOTS_LOCK as DEPLOY_IT_LOCK;
 
     /// Image légère, container qui reste vivant (CMD de l'image, `run_command` laissé None
     /// -> on teste le drop du hack `sleep` du POC).
