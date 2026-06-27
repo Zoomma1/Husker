@@ -1,5 +1,6 @@
 use axum::extract::{State, Path};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -184,6 +185,27 @@ pub async fn deploy_app(
 ) -> Result<Json<App>, AppError> {
     let app = crate::deploy::deploy(&state, app_id).await?;
     Ok(Json(app))
+}
+
+/// `POST /api/apps/{id}/stop` — arrête le container, `status = stopped` (HUSKER-14).
+/// 404 si app/container absent ; 304 si déjà arrêté ; 502 sur erreur Docker.
+pub async fn stop_app(
+    Path(app_id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    match crate::deploy::stop(&state, app_id).await? {
+        crate::deploy::StopOutcome::Stopped(app) => Ok(Json(*app).into_response()),
+        crate::deploy::StopOutcome::AlreadyStopped => Ok(StatusCode::NOT_MODIFIED.into_response()),
+    }
+}
+
+/// `POST /api/apps/{id}/restart` — relance le container, `status = running` (HUSKER-14).
+/// 404 si app/container absent ; 502 sur erreur Docker.
+pub async fn restart_app(
+    Path(app_id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<Json<App>, AppError> {
+    Ok(Json(crate::deploy::restart(&state, app_id).await?))
 }
 
 #[cfg(test)]
