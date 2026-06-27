@@ -5,6 +5,9 @@ mod routes;
 mod extractors;
 mod deploy;
 
+#[cfg(test)]
+mod pipeline_e2e;
+
 use axum::{routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
