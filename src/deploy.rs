@@ -1,4 +1,5 @@
-//! Pipeline de déploiement : `git → build → run` (HUSKER-13, jalon M3).
+//! Pipeline de déploiement `git → build → run` (HUSKER-13) + lifecycle du container
+//! déployé : `stop` / `restart` (HUSKER-14). Jalon M3.
 //!
 //! Logique extraite des POCs HUSKER-10/11/12 (binaires `src/bin/poc_*.rs`, gelés),
 //! adaptée pour l'intégration : retours `Result<_, AppError>`, branche honorée,
@@ -104,6 +105,109 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
     Ok(sha)
 }
 
+/// Résultat d'un `stop` : container effectivement arrêté, ou déjà arrêté (304 Docker).
+/// Distingués pour mapper `AlreadyStopped` en HTTP 304 côté handler (idempotence).
+pub enum StopOutcome {
+    // `App` est volumineux (~240 o) : boxé pour équilibrer la taille des variantes (clippy).
+    Stopped(Box<App>),
+    AlreadyStopped,
+}
+
+/// Charge l'app (404 si absente) et son projet (network / nom). Helper partagé stop/restart.
+async fn load_app_and_project(state: &AppState, app_id: i64) -> Result<(App, Project), AppError> {
+    let app = sqlx::query_as!(
+        App,
+        "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
+         FROM apps WHERE id = ?",
+        app_id
+    )
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let project = sqlx::query_as!(
+        Project,
+        "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
+        app.project_id
+    )
+    .fetch_one(&state.pool)
+    .await?;
+
+    Ok((app, project))
+}
+
+/// Recharge l'app avec son status à jour.
+async fn reload_app(state: &AppState, app_id: i64) -> Result<App, AppError> {
+    Ok(sqlx::query_as!(
+        App,
+        "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
+         FROM apps WHERE id = ?",
+        app_id
+    )
+    .fetch_one(&state.pool)
+    .await?)
+}
+
+/// Arrête le container d'une app et passe `status = stopped` (HUSKER-14).
+/// Le container est conservé (pas de `rm`) -> `restart` peut le relancer sans redéployer.
+/// 404 si l'app n'existe pas (DB) OU si son container n'existe pas (app jamais déployée).
+/// Container déjà arrêté -> `StopOutcome::AlreadyStopped` (idempotence -> 304), pas d'UPDATE.
+///
+/// On inspecte AVANT de stopper : bollard renvoie `Ok` même quand le container est déjà
+/// arrêté (le 304 Docker n'est pas surfacé comme erreur), donc l'état doit être lu via
+/// `inspect_container`. L'inspection donne aussi l'existence (404 -> NotFound).
+pub async fn stop(state: &AppState, app_id: i64) -> Result<StopOutcome, AppError> {
+    let (app, project) = load_app_and_project(state, app_id).await?;
+    let name = run::container_name(&project.name, &app.name);
+
+    let info = match state.docker.inspect_container(&name, None).await {
+        Ok(info) => info,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => return Err(AppError::NotFound),
+        Err(e) => return Err(AppError::Docker(e)),
+    };
+
+    let running = info.state.and_then(|s| s.running).unwrap_or(false);
+    if !running {
+        return Ok(StopOutcome::AlreadyStopped);
+    }
+
+    state
+        .docker
+        .stop_container(&name, None::<bollard::query_parameters::StopContainerOptions>)
+        .await?;
+    sqlx::query!("UPDATE apps SET status = 'stopped' WHERE id = ?", app_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(StopOutcome::Stopped(Box::new(reload_app(state, app_id).await?)))
+}
+
+/// Relance le container d'une app (depuis l'état stopped ou running) et passe `status = running`.
+/// `restart_container` est idempotent côté état : il démarre un container arrêté, bounce un
+/// container vivant. 404 si l'app n'existe pas (DB) OU si son container n'existe pas.
+pub async fn restart(state: &AppState, app_id: i64) -> Result<App, AppError> {
+    let (app, project) = load_app_and_project(state, app_id).await?;
+    let name = run::container_name(&project.name, &app.name);
+
+    match state
+        .docker
+        .restart_container(&name, None::<bollard::query_parameters::RestartContainerOptions>)
+        .await
+    {
+        Ok(_) => {
+            sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
+                .execute(&state.pool)
+                .await?;
+            reload_app(state, app_id).await
+        }
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Err(AppError::NotFound),
+        Err(e) => Err(AppError::Docker(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,13 +220,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::LazyLock;
-    use tokio::sync::Mutex;
 
-    /// Les tests d'intégration deploy posent des roots via variables d'env de process
-    /// (globales) → on les sérialise pour éviter les races (`cargo test -- --ignored`
-    /// est multi-thread). Mutex tokio (async) : son guard peut être tenu à travers un await.
-    static DEPLOY_IT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    // Lock de sérialisation des roots (process-global), partagé avec la pipeline E2E.
+    use crate::routes::test_routes_helpers::ENV_ROOTS_LOCK as DEPLOY_IT_LOCK;
 
     /// Image légère, container qui reste vivant (CMD de l'image, `run_command` laissé None
     /// -> on teste le drop du hack `sleep` du POC).
@@ -520,6 +620,185 @@ mod tests {
             info.config.and_then(|c| c.image),
             Some(build::image_ref(&project, &app, &sha1)),
             "le container intact est bien celui du sha précédent"
+        );
+    }
+
+    // --- Stop / restart (HUSKER-14) ---
+
+    #[tokio::test]
+    #[ignore = "Docker+git réels : stop arrête le container sans le supprimer (cargo test -- --ignored)"]
+    async fn stop_marks_stopped_and_keeps_container() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha = commit_dockerfile(&repo, RUNNING_DOCKERFILE, "init");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        create_project_network(&docker, &network).await;
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker: docker.clone(),
+        };
+
+        deploy(&state, app_id).await.expect("deploy ok");
+        let outcome = stop(&state, app_id).await;
+
+        let container = run::container_name(&project, &app);
+        let inspect = docker.inspect_container(&container, None).await;
+        cleanup(&docker, &project, &app, &network, &[&sha]).await;
+
+        assert!(
+            matches!(outcome, Ok(StopOutcome::Stopped(_))),
+            "stop doit réussir"
+        );
+        assert_eq!(
+            app_status(&pool, app_id).await,
+            "stopped",
+            "status DB -> stopped"
+        );
+        let info = inspect.expect("le container doit toujours exister après stop");
+        assert_eq!(
+            info.state.and_then(|s| s.running),
+            Some(false),
+            "container arrêté, pas supprimé"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker+git réels : 2e stop -> AlreadyStopped (304) (cargo test -- --ignored)"]
+    async fn stop_already_stopped_returns_already_stopped() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha = commit_dockerfile(&repo, RUNNING_DOCKERFILE, "init");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        create_project_network(&docker, &network).await;
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker: docker.clone(),
+        };
+
+        deploy(&state, app_id).await.expect("deploy ok");
+        stop(&state, app_id).await.expect("1er stop ok");
+        let second = stop(&state, app_id).await;
+
+        cleanup(&docker, &project, &app, &network, &[&sha]).await;
+
+        assert!(
+            matches!(second, Ok(StopOutcome::AlreadyStopped)),
+            "stop idempotent : 2e stop -> AlreadyStopped (304), pas d'erreur"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker+git réels : restart relance un container stoppé (cargo test -- --ignored)"]
+    async fn restart_brings_stopped_container_back_running() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha = commit_dockerfile(&repo, RUNNING_DOCKERFILE, "init");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        create_project_network(&docker, &network).await;
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker: docker.clone(),
+        };
+
+        deploy(&state, app_id).await.expect("deploy ok");
+        stop(&state, app_id).await.expect("stop ok");
+        let result = restart(&state, app_id).await;
+
+        let container = run::container_name(&project, &app);
+        let inspect = docker.inspect_container(&container, None).await;
+        cleanup(&docker, &project, &app, &network, &[&sha]).await;
+
+        let app_after = result.expect("restart doit réussir");
+        assert_eq!(app_after.status, "running", "status DB -> running");
+        let info = inspect.expect("container présent");
+        assert_eq!(
+            info.state.and_then(|s| s.running),
+            Some(true),
+            "container redémarré après restart"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker réel : stop d'une app jamais déployée (container absent) -> 404 (cargo test -- --ignored)"]
+    async fn stop_app_without_container_is_not_found() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        // Seed DB uniquement : pas de network, pas de deploy -> aucun container.
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(
+            &pool,
+            &project,
+            &network,
+            &app,
+            "https://example.invalid/repo",
+            "main",
+        )
+        .await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker,
+        };
+
+        let result = stop(&state, app_id).await;
+        assert!(
+            matches!(result, Err(AppError::NotFound)),
+            "container absent (app jamais déployée) -> NotFound (404)"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker réel : restart d'une app jamais déployée (container absent) -> 404 (cargo test -- --ignored)"]
+    async fn restart_app_without_container_is_not_found() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(
+            &pool,
+            &project,
+            &network,
+            &app,
+            "https://example.invalid/repo",
+            "main",
+        )
+        .await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker,
+        };
+
+        let result = restart(&state, app_id).await;
+        assert!(
+            matches!(result, Err(AppError::NotFound)),
+            "container absent (app jamais déployée) -> NotFound (404)"
         );
     }
 }

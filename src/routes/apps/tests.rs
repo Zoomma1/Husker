@@ -350,3 +350,33 @@ async fn test_deploy_app_not_found() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 404);
 }
+
+#[tokio::test]
+async fn test_stop_app_not_found() {
+    // App inconnue -> 404 avant tout appel Docker (lifecycle retourne NotFound au load DB).
+    let ctx = TestApp::new().await;
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/api/apps/9999999/stop")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = ctx.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn test_restart_app_not_found() {
+    // Idem stop : app inconnue -> 404 avant tout appel Docker.
+    let ctx = TestApp::new().await;
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/api/apps/9999999/restart")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = ctx.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 404);
+}
