@@ -1,7 +1,7 @@
+use super::*;
+use crate::routes::test_routes_helpers::TestApp;
 use axum::http;
 use tower::ServiceExt;
-use crate::routes::test_routes_helpers::TestApp;
-use super::*;
 
 #[tokio::test]
 async fn test_create_app_happy_path() {
@@ -24,7 +24,9 @@ async fn test_create_app_happy_path() {
 
     assert_eq!(response.status(), 201);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app: App = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(app.name, app_name);
@@ -114,7 +116,9 @@ async fn test_list_apps_happy_path() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let apps: Vec<App> = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(apps.len(), 2);
@@ -154,7 +158,9 @@ async fn test_list_apps_empty_project() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let apps: Vec<App> = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(apps.len(), 0);
@@ -179,10 +185,12 @@ async fn test_get_app_happy_path() {
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app_id = serde_json::from_slice::<App>(&bytes).unwrap().id;
 
-    let request =http::Request::builder()
+    let request = http::Request::builder()
         .method("GET")
         .uri(format!("/api/projects/{}/apps/{}", project_id, app_id))
         .body(axum::body::Body::empty())
@@ -191,7 +199,9 @@ async fn test_get_app_happy_path() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app: App = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(app.name, app_name);
@@ -206,7 +216,7 @@ async fn test_get_app_not_found() {
     let ctx = TestApp::new().await;
     let project_id = ctx.with_project().await;
 
-    let request =http::Request::builder()
+    let request = http::Request::builder()
         .method("GET")
         .uri(format!("/api/projects/{}/apps/{}", project_id, 999999))
         .body(axum::body::Body::empty())
@@ -235,10 +245,12 @@ async fn test_get_app_project_not_found() {
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app_id = serde_json::from_slice::<App>(&bytes).unwrap().id;
 
-    let request =http::Request::builder()
+    let request = http::Request::builder()
         .method("GET")
         .uri(format!("/api/projects/{}/apps/{}", 99999, app_id))
         .body(axum::body::Body::empty())
@@ -266,7 +278,9 @@ async fn test_delete_app_happy_path() {
         .unwrap();
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app_id = serde_json::from_slice::<App>(&bytes).unwrap().id;
 
     let request = http::Request::builder()
@@ -321,7 +335,9 @@ async fn test_delete_app_project_not_found() {
         .unwrap();
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let app_id = serde_json::from_slice::<App>(&bytes).unwrap().id;
 
     let request = http::Request::builder()

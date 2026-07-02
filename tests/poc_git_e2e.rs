@@ -66,7 +66,10 @@ fn e2e_local_clone_then_pull_via_binary() {
     let (out1, ok1) = run(&sources, url, "myapp");
     assert!(ok1, "run 1 doit réussir.\n{out1}");
     assert!(out1.contains("clone"), "run 1 doit cloner.\n{out1}");
-    assert!(out1.contains("HEAD sha"), "run 1 doit afficher le sha.\n{out1}");
+    assert!(
+        out1.contains("HEAD sha"),
+        "run 1 doit afficher le sha.\n{out1}"
+    );
     assert!(sources.join("myapp").join("README.md").exists());
 
     // Le remote avance d'un commit.
@@ -103,7 +106,10 @@ fn e2e_network_clone_then_pull_github() {
     let (out1, ok1) = run(&sources, url, "hello");
     assert!(ok1, "run 1 doit réussir.\n{out1}");
     assert!(out1.contains("clone"), "run 1 doit cloner.\n{out1}");
-    assert!(out1.contains("HEAD sha"), "run 1 doit afficher le sha.\n{out1}");
+    assert!(
+        out1.contains("HEAD sha"),
+        "run 1 doit afficher le sha.\n{out1}"
+    );
 
     // 2) Repo public stable -> pull, déjà à jour (et surtout : pas de re-clone).
     let (out2, ok2) = run(&sources, url, "hello");

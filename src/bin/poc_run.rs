@@ -22,7 +22,9 @@
 //!   - 1er run            -> create + start
 //!   - run suivant idem   -> remove du container précédent puis re-create (idempotent)
 
-use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountTypeEnum, NetworkCreateRequest};
+use bollard::models::{
+    ContainerCreateBody, HostConfig, Mount, MountTypeEnum, NetworkCreateRequest,
+};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
 };
@@ -56,7 +58,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let data_abs = std::fs::canonicalize(&data_dir)?;
 
     // Env vars injectées : jeu de démo au POC ; viendront de la table `env_vars` en HUSKER-13.
-    let env = vec![("HUSKER_GREETING".to_string(), "hello from husker".to_string())];
+    let env = vec![(
+        "HUSKER_GREETING".to_string(),
+        "hello from husker".to_string(),
+    )];
 
     println!("image     : {tag}");
     println!("network   : {network}");
@@ -196,10 +201,7 @@ async fn run_container(
 async fn report(docker: &Docker, name: &str) -> Result<(), Box<dyn Error>> {
     let info = docker.inspect_container(name, None).await?;
 
-    let running = info
-        .state
-        .and_then(|s| s.running)
-        .unwrap_or(false);
+    let running = info.state.and_then(|s| s.running).unwrap_or(false);
     println!("  running   : {running}");
 
     if let Some(networks) = info.network_settings.and_then(|n| n.networks) {
@@ -218,7 +220,10 @@ mod tests {
 
     #[test]
     fn image_tag_format() {
-        assert_eq!(image_tag("demo", "hello", "abc123"), "husker/demo_hello:abc123");
+        assert_eq!(
+            image_tag("demo", "hello", "abc123"),
+            "husker/demo_hello:abc123"
+        );
     }
 
     #[test]
@@ -244,7 +249,13 @@ mod tests {
     fn config_injects_image_env_network_and_mount() {
         let env = vec![("KEY".to_string(), "VAL".to_string())];
         let host = Path::new("/srv/data/demo/hello/data");
-        let cfg = build_container_config("husker/demo_hello:dev", &env, "husker_demo", host, keep_alive_cmd());
+        let cfg = build_container_config(
+            "husker/demo_hello:dev",
+            &env,
+            "husker_demo",
+            host,
+            keep_alive_cmd(),
+        );
 
         assert_eq!(cfg.image.as_deref(), Some("husker/demo_hello:dev"));
         assert_eq!(cfg.env.as_ref().unwrap(), &vec!["KEY=VAL".to_string()]);

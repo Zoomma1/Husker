@@ -1,7 +1,7 @@
+use super::*;
+use crate::routes::test_routes_helpers::TestApp;
 use axum::http;
 use tower::ServiceExt;
-use crate::routes::test_routes_helpers::TestApp;
-use super::*;
 
 #[tokio::test]
 async fn create_env_var_happy_path() {
@@ -11,7 +11,8 @@ async fn create_env_var_happy_path() {
     let ctx = TestApp::new().await;
     let (project_id, app_id) = ctx.with_app().await;
 
-    let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
+    let body =
+        serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
         .method("POST")
         .uri(format!("/api/projects/{}/apps/{}/env", project_id, app_id))
@@ -22,7 +23,9 @@ async fn create_env_var_happy_path() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 201);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let env_var: EnvVar = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(env_var.key, "DATABASE_URL");
     assert_eq!(env_var.value, expected_database_url);
@@ -76,7 +79,8 @@ async fn create_env_var_duplicate_key_returns_409() {
     let ctx = TestApp::new().await;
     let (project_id, app_id) = ctx.with_app().await;
 
-    let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
+    let body =
+        serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
         .method("POST")
         .uri(format!("/api/projects/{}/apps/{}/env", project_id, app_id))
@@ -86,7 +90,8 @@ async fn create_env_var_duplicate_key_returns_409() {
 
     let _response = ctx.router.clone().oneshot(request).await.unwrap();
 
-    let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
+    let body =
+        serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
         .method("POST")
         .uri(format!("/api/projects/{}/apps/{}/env", project_id, app_id))
@@ -106,10 +111,14 @@ async fn create_env_var_app_not_found_returns_404() {
     let ctx = TestApp::new().await;
     let project_id = ctx.with_project().await;
 
-    let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
+    let body =
+        serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
         .method("POST")
-        .uri(format!("/api/projects/{}/apps/{}/env", project_id, "99999999"))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env",
+            project_id, "99999999"
+        ))
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from(body))
         .unwrap();
@@ -125,7 +134,8 @@ async fn create_env_var_project_not_found_returns_404() {
 
     let ctx = TestApp::new().await;
 
-    let body = serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
+    let body =
+        serde_json::json!({ "key": "DATABASE_URL", "value": expected_database_url }).to_string();
     let request = http::Request::builder()
         .method("POST")
         .uri(format!("/api/projects/{}/apps/{}/env", "9999999", "1"))
@@ -153,7 +163,9 @@ async fn list_env_happy_path_empty() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let env_vars: Vec<EnvVar> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(env_vars.len(), 0);
 }
@@ -163,11 +175,20 @@ async fn list_env_happy_path_with_vars() {
     let ctx = TestApp::new().await;
     let (project_id, app_id) = ctx.with_app().await;
 
-    for (k, v) in [("DATABASE_URL", "postgres://x"), ("PORT", "8080"), ("LOG_LEVEL", "info")] {
+    for (k, v) in [
+        ("DATABASE_URL", "postgres://x"),
+        ("PORT", "8080"),
+        ("LOG_LEVEL", "info"),
+    ] {
         sqlx::query!(
             "INSERT INTO env_vars (app_id, key, value) VALUES (?, ?, ?)",
-            app_id, k, v
-        ).execute(&ctx.pool).await.unwrap();
+            app_id,
+            k,
+            v
+        )
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
     }
 
     let request = http::Request::builder()
@@ -179,7 +200,9 @@ async fn list_env_happy_path_with_vars() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let env_vars: Vec<EnvVar> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(env_vars.len(), 3);
     let keys: Vec<&str> = env_vars.iter().map(|e| e.key.as_str()).collect();
@@ -198,11 +221,17 @@ async fn list_env_scoped_to_app() {
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'MINE', 'a')",
         app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'OTHER', 'b')",
         other_app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let request = http::Request::builder()
         .method("GET")
@@ -212,7 +241,9 @@ async fn list_env_scoped_to_app() {
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let env_vars: Vec<EnvVar> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(env_vars.len(), 1);
     assert_eq!(env_vars[0].key, "MINE");
@@ -256,18 +287,26 @@ async fn get_env_happy_path() {
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'DATABASE_URL', 'postgres://x')",
         app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let request = http::Request::builder()
         .method("GET")
-        .uri(format!("/api/projects/{}/apps/{}/env/DATABASE_URL", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/DATABASE_URL",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let env_var: EnvVar = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(env_var.key, "DATABASE_URL");
     assert_eq!(env_var.value, "postgres://x");
@@ -281,7 +320,10 @@ async fn get_env_key_not_found_returns_404() {
 
     let request = http::Request::builder()
         .method("GET")
-        .uri(format!("/api/projects/{}/apps/{}/env/UNKNOWN_KEY", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/UNKNOWN_KEY",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
@@ -299,11 +341,17 @@ async fn get_env_scoped_to_app() {
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'SHARED_KEY', 'value_other')",
         other_app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let request = http::Request::builder()
         .method("GET")
-        .uri(format!("/api/projects/{}/apps/{}/env/SHARED_KEY", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/SHARED_KEY",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
@@ -349,11 +397,17 @@ async fn delete_env_happy_path_returns_204() {
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'DATABASE_URL', 'postgres://x')",
         app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let request = http::Request::builder()
         .method("DELETE")
-        .uri(format!("/api/projects/{}/apps/{}/env/DATABASE_URL", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/DATABASE_URL",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
@@ -364,7 +418,10 @@ async fn delete_env_happy_path_returns_204() {
     let remaining = sqlx::query!(
         "SELECT id FROM env_vars WHERE app_id = ? AND key = 'DATABASE_URL'",
         app_id
-    ).fetch_optional(&ctx.pool).await.unwrap();
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap();
     assert!(remaining.is_none());
 }
 
@@ -376,7 +433,10 @@ async fn delete_env_idempotent_unknown_key_returns_204() {
 
     let request = http::Request::builder()
         .method("DELETE")
-        .uri(format!("/api/projects/{}/apps/{}/env/UNKNOWN_KEY", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/UNKNOWN_KEY",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
@@ -394,11 +454,17 @@ async fn delete_env_scoped_to_app() {
     sqlx::query!(
         "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'SHARED', 'a')",
         other_app_id
-    ).execute(&ctx.pool).await.unwrap();
+    )
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
 
     let request = http::Request::builder()
         .method("DELETE")
-        .uri(format!("/api/projects/{}/apps/{}/env/SHARED", project_id, app_id))
+        .uri(format!(
+            "/api/projects/{}/apps/{}/env/SHARED",
+            project_id, app_id
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
 
@@ -408,7 +474,10 @@ async fn delete_env_scoped_to_app() {
     let still_there = sqlx::query!(
         "SELECT id FROM env_vars WHERE app_id = ? AND key = 'SHARED'",
         other_app_id
-    ).fetch_optional(&ctx.pool).await.unwrap();
+    )
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap();
     assert!(still_there.is_some(), "env var de l'autre app doit rester");
 }
 

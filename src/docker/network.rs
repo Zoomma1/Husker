@@ -5,7 +5,10 @@ pub async fn ping_daemon(docker: &Docker) -> Result<(), bollard::errors::Error> 
     Ok(())
 }
 
-pub(crate) async fn create_network(docker: &Docker, network_name: &str) -> Result<(), bollard::errors::Error> {
+pub(crate) async fn create_network(
+    docker: &Docker,
+    network_name: &str,
+) -> Result<(), bollard::errors::Error> {
     let options = bollard::models::NetworkCreateRequest {
         name: network_name.to_string(),
         ..Default::default()
@@ -14,7 +17,10 @@ pub(crate) async fn create_network(docker: &Docker, network_name: &str) -> Resul
     Ok(())
 }
 
-pub(crate) async fn delete_network(docker: &Docker, network_name: &str) -> Result<(), bollard::errors::Error> {
+pub(crate) async fn delete_network(
+    docker: &Docker,
+    network_name: &str,
+) -> Result<(), bollard::errors::Error> {
     docker.remove_network(network_name).await?;
     Ok(())
 }

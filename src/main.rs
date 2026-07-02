@@ -1,19 +1,19 @@
-mod errors;
-mod docker;
-mod state;
-mod routes;
-mod extractors;
 mod deploy;
+mod docker;
+mod errors;
+mod extractors;
+mod routes;
+mod state;
 
 #[cfg(test)]
 mod pipeline_e2e;
 
+use crate::state::AppState;
 use axum::{routing::get, routing::post, Json, Router};
+use bollard::Docker;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tokio::net::TcpListener;
-use bollard::Docker;
-use crate::state::AppState;
 
 #[derive(Serialize)]
 struct PingResponse {
@@ -53,24 +53,39 @@ async fn main() {
 
     let docker = Docker::connect_with_local_defaults().unwrap();
 
-    let state = AppState {
-        pool,
-        docker,
-    };
+    let state = AppState { pool, docker };
     let app = app(state);
-    
+
     axum::serve(listener, app).await.unwrap();
 }
 
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/ping", get(ping))
-        .route("/api/projects", post(routes::projects::create_project).get(routes::projects::list_projects))
-        .route("/api/projects/{id}", get(routes::projects::get_project).delete(routes::projects::delete_project))
-        .route("/api/projects/{id}/apps", post(routes::apps::create_app).get(routes::apps::list_apps))
-        .route("/api/projects/{id}/apps/{app_id}", get(routes::apps::get_app).delete(routes::apps::delete_app))
-        .route("/api/projects/{id}/apps/{app_id}/env", post(routes::env_vars::create_env).get(routes::env_vars::list_env))
-        .route("/api/projects/{id}/apps/{app_id}/env/{key}", get(routes::env_vars::get_env).delete(routes::env_vars::delete_env))
+        .route(
+            "/api/projects",
+            post(routes::projects::create_project).get(routes::projects::list_projects),
+        )
+        .route(
+            "/api/projects/{id}",
+            get(routes::projects::get_project).delete(routes::projects::delete_project),
+        )
+        .route(
+            "/api/projects/{id}/apps",
+            post(routes::apps::create_app).get(routes::apps::list_apps),
+        )
+        .route(
+            "/api/projects/{id}/apps/{app_id}",
+            get(routes::apps::get_app).delete(routes::apps::delete_app),
+        )
+        .route(
+            "/api/projects/{id}/apps/{app_id}/env",
+            post(routes::env_vars::create_env).get(routes::env_vars::list_env),
+        )
+        .route(
+            "/api/projects/{id}/apps/{app_id}/env/{key}",
+            get(routes::env_vars::get_env).delete(routes::env_vars::delete_env),
+        )
         .route("/api/apps/{id}/deploy", post(routes::apps::deploy_app))
         .route("/api/apps/{id}/stop", post(routes::apps::stop_app))
         .route("/api/apps/{id}/restart", post(routes::apps::restart_app))

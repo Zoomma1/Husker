@@ -1,11 +1,14 @@
-use axum::{extract::{State, Path}, Json};
-use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
-use validator::Validate;
-use crate::state::AppState;
+use crate::docker;
 use crate::errors::AppError;
 use crate::extractors::{non_blank, ValidatedJson};
-use crate::docker;
+use crate::state::AppState;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct CreateProjectRequest {
@@ -25,14 +28,14 @@ pub async fn create_project(
     State(state): State<AppState>,
     ValidatedJson(payload): ValidatedJson<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
-    let existing = sqlx::query!(
-        "SELECT id FROM projects WHERE name = ?",
-        payload.name
-    ).fetch_optional(&state.pool).await?;
+    let existing = sqlx::query!("SELECT id FROM projects WHERE name = ?", payload.name)
+        .fetch_optional(&state.pool)
+        .await?;
 
     if existing.is_some() {
         return Err(AppError::Validation(format!(
-            "project '{}' already exists", payload.name
+            "project '{}' already exists",
+            payload.name
         )));
     }
 
@@ -48,23 +51,27 @@ pub async fn create_project(
         payload.name,
         network_name,
         created_at
-    ).fetch_one(&state.pool).await;
+    )
+    .fetch_one(&state.pool)
+    .await;
     match res {
         Ok(project) => Ok((StatusCode::CREATED, Json(project))),
         Err(e) => {
-            docker::network::delete_network(&state.docker, &network_name).await.ok();
+            docker::network::delete_network(&state.docker, &network_name)
+                .await
+                .ok();
             Err(e.into())
         }
     }
 }
 
-pub async fn list_projects(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<Project>>, AppError> {
+pub async fn list_projects(State(state): State<AppState>) -> Result<Json<Vec<Project>>, AppError> {
     let projects = sqlx::query_as!(
         Project,
         "SELECT id, name, network_name, created_at FROM projects ORDER BY id ASC"
-    ).fetch_all(&state.pool).await?;
+    )
+    .fetch_all(&state.pool)
+    .await?;
     Ok(Json(projects))
 }
 
@@ -76,7 +83,9 @@ pub async fn get_project(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     match project {
         Some(p) => Ok(Json(p)),
@@ -92,7 +101,9 @@ pub async fn delete_project(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     let project = match project {
         Some(p) => p,
@@ -101,7 +112,9 @@ pub async fn delete_project(
 
     match docker::network::delete_network(&state.docker, &project.network_name).await {
         Ok(_) => {}
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => {
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
             tracing::warn!(
                 network = %project.network_name,
                 "Docker network already gone, proceeding with DB delete"
@@ -111,7 +124,8 @@ pub async fn delete_project(
     }
 
     sqlx::query!("DELETE FROM projects WHERE id = ?", project_id)
-        .execute(&state.pool).await?;
+        .execute(&state.pool)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -116,7 +116,13 @@ async fn full_lifecycle_create_deploy_stop_remove() {
     let container = format!("husker_{project_name}_{app_name}");
 
     // 1. CRÉATION du projet -> 201 + network Docker créé par le handler.
-    let (status, project) = send(&ctx, "POST", "/api/projects", Some(json!({"name": project_name}))).await;
+    let (status, project) = send(
+        &ctx,
+        "POST",
+        "/api/projects",
+        Some(json!({"name": project_name})),
+    )
+    .await;
     assert_eq!(status, 201, "création projet");
     let project_id = project["id"].as_i64().expect("project id");
     assert!(
@@ -175,13 +181,22 @@ async fn full_lifecycle_create_deploy_stop_remove() {
     assert!(
         matches!(
             docker.inspect_container(&container, None).await,
-            Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. })
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404,
+                ..
+            })
         ),
         "container effectivement supprimé"
     );
 
     // 6. NETTOYAGE des ressources : delete app (DB) puis delete project (supprime le network).
-    let (status, _) = send(&ctx, "DELETE", &format!("/api/projects/{project_id}/apps/{app_id}"), None).await;
+    let (status, _) = send(
+        &ctx,
+        "DELETE",
+        &format!("/api/projects/{project_id}/apps/{app_id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, 204, "delete app");
     let (status, _) = send(&ctx, "DELETE", &format!("/api/projects/{project_id}"), None).await;
     assert_eq!(status, 204, "delete project");
