@@ -1,13 +1,13 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::Json;
-use serde::{Deserialize, Serialize};
-use validator::{Validate, ValidationError};
 use crate::errors::AppError;
 use crate::extractors::ValidatedJson;
 use crate::routes::apps::App;
 use crate::routes::projects::Project;
 use crate::state::AppState;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationError};
 
 #[derive(Deserialize, Validate)]
 pub struct CreateEnvVarRequest {
@@ -44,7 +44,9 @@ pub async fn create_env(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -67,11 +69,14 @@ pub async fn create_env(
         "SELECT id, app_id, key, value FROM env_vars WHERE app_id = ? AND key = ?",
         app_id,
         payload.key
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if dup.is_some() {
         return Err(AppError::Conflict(format!(
-            "env var with key '{}' already exists for this app", payload.key
+            "env var with key '{}' already exists for this app",
+            payload.key
         )));
     }
 
@@ -83,7 +88,9 @@ pub async fn create_env(
         app_id,
         payload.key,
         payload.value
-    ).fetch_one(&state.pool).await?;
+    )
+    .fetch_one(&state.pool)
+    .await?;
 
     Ok((StatusCode::CREATED, Json(res)))
 }
@@ -96,7 +103,9 @@ pub async fn list_env(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -118,7 +127,9 @@ pub async fn list_env(
         EnvVar,
         "SELECT id, app_id, key, value FROM env_vars WHERE app_id = ?",
         app_id
-    ).fetch_all(&state.pool).await?;
+    )
+    .fetch_all(&state.pool)
+    .await?;
 
     Ok(Json(env_vars))
 }
@@ -131,7 +142,9 @@ pub async fn get_env(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -154,7 +167,9 @@ pub async fn get_env(
         "SELECT id, app_id, key, value FROM env_vars WHERE app_id = ? AND key = ?",
         app_id,
         key
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     match env_var {
         Some(e) => Ok(Json(e)),
@@ -170,7 +185,9 @@ pub async fn delete_env(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -192,7 +209,9 @@ pub async fn delete_env(
         "DELETE FROM env_vars WHERE app_id = ? AND key = ?",
         app_id,
         key
-    ).execute(&state.pool).await?;
+    )
+    .execute(&state.pool)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

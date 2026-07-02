@@ -1,7 +1,7 @@
+use crate::errors::AppError;
 use axum::extract::{FromRequest, Request};
 use axum::Json;
 use validator::{Validate, ValidationError};
-use crate::errors::AppError;
 
 /// Extractor qui désérialise le body JSON en `T` puis applique `Validate`.
 ///

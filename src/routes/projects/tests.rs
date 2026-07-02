@@ -22,17 +22,23 @@ async fn test_create_project_happy_path() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 201);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let project: Project = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(project.name, project_name);
     assert_eq!(project.network_name, expected_network);
 
     let row = sqlx::query!("SELECT name FROM projects WHERE id = ?", project.id)
-        .fetch_one(&ctx.pool).await.unwrap();
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
     assert_eq!(row.name, project_name);
 
     let networks = ctx.docker.list_networks(None).await.unwrap();
-    assert!(networks.iter().any(|n| n.name.as_deref() == Some(&expected_network)));
+    assert!(networks
+        .iter()
+        .any(|n| n.name.as_deref() == Some(&expected_network)));
 
     ctx.docker.remove_network(&expected_network).await.ok();
 }
@@ -119,15 +125,23 @@ async fn test_list_projects() {
     let response = ctx.router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let projects: Vec<Project> = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(projects.len(), 2);
     assert_eq!(projects[0].name, name1);
     assert_eq!(projects[1].name, name2);
 
-    ctx.docker.remove_network(&format!("husker_{}", name1)).await.ok();
-    ctx.docker.remove_network(&format!("husker_{}", name2)).await.ok();
+    ctx.docker
+        .remove_network(&format!("husker_{}", name1))
+        .await
+        .ok();
+    ctx.docker
+        .remove_network(&format!("husker_{}", name2))
+        .await
+        .ok();
 }
 
 #[tokio::test]
@@ -146,7 +160,9 @@ async fn test_get_project_happy_path() {
         .unwrap();
 
     let response = ctx.router.clone().oneshot(request).await.unwrap();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let project: Project = serde_json::from_slice(&bytes).unwrap();
     let project_id = project.id;
 
@@ -159,12 +175,17 @@ async fn test_get_project_happy_path() {
 
     assert_eq!(response.status(), 200);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let project: Project = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(project.id, project_id);
     assert_eq!(project.name, name);
-    ctx.docker.remove_network(&format!("husker_{}", name)).await.ok();
+    ctx.docker
+        .remove_network(&format!("husker_{}", name))
+        .await
+        .ok();
 }
 
 #[tokio::test]
@@ -195,7 +216,9 @@ async fn test_delete_project_happy_path() {
         .body(Body::from(body))
         .unwrap();
     let response = ctx.router.clone().oneshot(request).await.unwrap();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let project: Project = serde_json::from_slice(&bytes).unwrap();
     let project_id = project.id;
     let request = http::Request::builder()
@@ -208,11 +231,15 @@ async fn test_delete_project_happy_path() {
     assert_eq!(response.status(), 204);
 
     let row = sqlx::query!("SELECT id FROM projects WHERE id = ?", project_id)
-        .fetch_optional(&ctx.pool).await.unwrap();
+        .fetch_optional(&ctx.pool)
+        .await
+        .unwrap();
     assert!(row.is_none());
 
     let networks = ctx.docker.list_networks(None).await.unwrap();
-    assert!(!networks.iter().any(|n| n.name.as_deref() == Some(&format!("husker_{}", name))));
+    assert!(!networks
+        .iter()
+        .any(|n| n.name.as_deref() == Some(&format!("husker_{}", name))));
 }
 
 #[tokio::test]

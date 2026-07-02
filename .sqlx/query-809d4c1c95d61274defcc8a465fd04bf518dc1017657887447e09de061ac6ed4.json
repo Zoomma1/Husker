@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'OTHER', 'b')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "809d4c1c95d61274defcc8a465fd04bf518dc1017657887447e09de061ac6ed4"
+}

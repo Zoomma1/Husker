@@ -28,7 +28,10 @@ fn e2e_build_success_via_binary() {
         "exit != 0\n{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("✓ image"), "pas de confirmation de build :\n{stdout}");
+    assert!(
+        stdout.contains("✓ image"),
+        "pas de confirmation de build :\n{stdout}"
+    );
 
     // L'image est-elle réellement taggée côté Docker ?
     let imgs = Command::new("docker")
@@ -46,7 +49,12 @@ fn e2e_build_success_via_binary() {
 #[test]
 #[ignore = "Docker: build BuildKit réel — cargo test -- --ignored"]
 fn e2e_broken_dockerfile_fails_without_panic() {
-    let out = run(&["demo", "broken", "dev", "tests/fixtures/build-context-broken"]);
+    let out = run(&[
+        "demo",
+        "broken",
+        "dev",
+        "tests/fixtures/build-context-broken",
+    ]);
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

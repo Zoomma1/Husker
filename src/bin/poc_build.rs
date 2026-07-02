@@ -123,7 +123,10 @@ mod tests {
 
     #[test]
     fn build_tag_format() {
-        assert_eq!(build_tag("demo", "hello", "abc123"), "husker/demo_hello:abc123");
+        assert_eq!(
+            build_tag("demo", "hello", "abc123"),
+            "husker/demo_hello:abc123"
+        );
     }
 
     #[test]

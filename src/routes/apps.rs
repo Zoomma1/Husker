@@ -1,13 +1,13 @@
-use axum::extract::{State, Path};
+use crate::errors::AppError;
+use crate::extractors::{non_blank, ValidatedJson};
+use crate::routes::projects::Project;
+use crate::state::AppState;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
-use crate::errors::AppError;
-use crate::extractors::{non_blank, ValidatedJson};
-use crate::routes::projects::Project;
-use crate::state::AppState;
 
 #[derive(Deserialize, Validate)]
 pub struct CreateAppRequest {
@@ -55,7 +55,9 @@ pub async fn create_app(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -97,7 +99,9 @@ pub async fn list_apps(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -121,7 +125,9 @@ pub async fn get_app(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -149,7 +155,9 @@ pub async fn delete_app(
         Project,
         "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
         project_id
-    ).fetch_optional(&state.pool).await?;
+    )
+    .fetch_optional(&state.pool)
+    .await?;
 
     if project.is_none() {
         return Err(AppError::NotFound);
@@ -171,7 +179,9 @@ pub async fn delete_app(
         "DELETE FROM apps WHERE id = ? AND project_id = ?",
         app_id,
         project_id
-    ).execute(&state.pool).await?;
+    )
+    .execute(&state.pool)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

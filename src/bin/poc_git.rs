@@ -222,7 +222,10 @@ mod tests {
         // 1) Premier appel -> clone, working tree peuplé.
         let repo = clone_or_update(url, &dest).unwrap();
         let sha1 = head_sha(&repo);
-        assert!(dest.join("README.md").exists(), "working tree peuplé au clone");
+        assert!(
+            dest.join("README.md").exists(),
+            "working tree peuplé au clone"
+        );
 
         // 2) Le remote avance d'un commit.
         commit_file(&remote, "README.md", "v2", "second");

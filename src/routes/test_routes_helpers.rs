@@ -47,7 +47,11 @@ impl TestApp {
         };
         let router = crate::app(state);
 
-        Self { router, pool, docker }
+        Self {
+            router,
+            pool,
+            docker,
+        }
     }
 
     /// Insère un project (nom unique). Retourne son id.

@@ -39,17 +39,34 @@ fn e2e_run_attaches_network_env_and_mount() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "exit != 0\n{stdout}\n{stderr}");
-    assert!(stdout.contains("running   : true"), "container pas running :\n{stdout}");
-    assert!(stdout.contains(network), "network projet absent du rapport :\n{stdout}");
+    assert!(
+        stdout.contains("running   : true"),
+        "container pas running :\n{stdout}"
+    );
+    assert!(
+        stdout.contains(network),
+        "network projet absent du rapport :\n{stdout}"
+    );
 
     // Vérifs côté Docker, indépendantes du stdout du binaire.
-    let net = docker(&["inspect", "-f", "{{json .NetworkSettings.Networks}}", container]);
+    let net = docker(&[
+        "inspect",
+        "-f",
+        "{{json .NetworkSettings.Networks}}",
+        container,
+    ]);
     let net = String::from_utf8_lossy(&net.stdout);
-    assert!(net.contains(network), "container pas attaché à {network} : {net}");
+    assert!(
+        net.contains(network),
+        "container pas attaché à {network} : {net}"
+    );
 
     let mounts = docker(&["inspect", "-f", "{{json .Mounts}}", container]);
     let mounts = String::from_utf8_lossy(&mounts.stdout);
-    assert!(mounts.contains("/data"), "bind mount /data absent : {mounts}");
+    assert!(
+        mounts.contains("/data"),
+        "bind mount /data absent : {mounts}"
+    );
 
     let env = docker(&["inspect", "-f", "{{json .Config.Env}}", container]);
     let env = String::from_utf8_lossy(&env.stdout);

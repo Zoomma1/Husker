@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO env_vars (app_id, key, value) VALUES (?, 'HUSKER_GREETING', 'hello')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "65b6d5352aa659c5488974ce55b4e35659c586ac19c9abd77fc2253692da4426"
+}

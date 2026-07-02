@@ -78,9 +78,10 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
     let url = app.git_url.clone();
     let branch = app.git_branch.clone();
     let dest_for_git = dest.clone();
-    let sha = tokio::task::spawn_blocking(move || git::clone_or_update(&url, &branch, &dest_for_git))
-        .await
-        .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
+    let sha =
+        tokio::task::spawn_blocking(move || git::clone_or_update(&url, &branch, &dest_for_git))
+            .await
+            .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
 
     // 2. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
     //    pas le container qui tourne).
@@ -175,12 +176,17 @@ pub async fn stop(state: &AppState, app_id: i64) -> Result<StopOutcome, AppError
 
     state
         .docker
-        .stop_container(&name, None::<bollard::query_parameters::StopContainerOptions>)
+        .stop_container(
+            &name,
+            None::<bollard::query_parameters::StopContainerOptions>,
+        )
         .await?;
     sqlx::query!("UPDATE apps SET status = 'stopped' WHERE id = ?", app_id)
         .execute(&state.pool)
         .await?;
-    Ok(StopOutcome::Stopped(Box::new(reload_app(state, app_id).await?)))
+    Ok(StopOutcome::Stopped(Box::new(
+        reload_app(state, app_id).await?,
+    )))
 }
 
 /// Relance le container d'une app (depuis l'état stopped ou running) et passe `status = running`.
@@ -192,7 +198,10 @@ pub async fn restart(state: &AppState, app_id: i64) -> Result<App, AppError> {
 
     match state
         .docker
-        .restart_container(&name, None::<bollard::query_parameters::RestartContainerOptions>)
+        .restart_container(
+            &name,
+            None::<bollard::query_parameters::RestartContainerOptions>,
+        )
         .await
     {
         Ok(_) => {
@@ -459,7 +468,11 @@ mod tests {
         assert_eq!(deployed.status, "running", "status DB -> running");
 
         let info = inspect.expect("container inspectable");
-        assert_eq!(info.state.and_then(|s| s.running), Some(true), "container running");
+        assert_eq!(
+            info.state.and_then(|s| s.running),
+            Some(true),
+            "container running"
+        );
 
         let networks = info
             .network_settings
@@ -559,9 +572,14 @@ mod tests {
         let result = deploy(&state, app_id).await;
 
         // Le code cloné est bien le HEAD de "feature", pas celui de la branche par défaut.
-        let cloned =
-            Repository::open(tmp.path().join("sources").join(app_id.to_string())).unwrap();
-        let cloned_sha = cloned.head().unwrap().peel_to_commit().unwrap().id().to_string();
+        let cloned = Repository::open(tmp.path().join("sources").join(app_id.to_string())).unwrap();
+        let cloned_sha = cloned
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
         cleanup(&docker, &project, &app, &network, &[&sha_feature]).await;
 
         result.expect("deploy ok");

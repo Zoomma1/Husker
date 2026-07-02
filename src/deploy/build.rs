@@ -93,7 +93,10 @@ mod tests {
 
     #[test]
     fn image_ref_format() {
-        assert_eq!(image_ref("demo", "hello", "abc123"), "husker/demo_hello:abc123");
+        assert_eq!(
+            image_ref("demo", "hello", "abc123"),
+            "husker/demo_hello:abc123"
+        );
     }
 
     #[test]
