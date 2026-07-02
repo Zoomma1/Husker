@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM env_vars WHERE app_id = ? AND key = 'DATABASE_URL'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc2b4a08088f9bc1f5d42487af07f16045a6051a7e25076311d7c56d6252b692"
+}

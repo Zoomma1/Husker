@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status\n         FROM apps WHERE id = ? AND project_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "project_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "git_url",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "git_branch",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "dockerfile_path",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "build_command",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_command",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "exposed",
+        "ordinal": 9,
+        "type_info": "Bool"
+      },
+      {
+        "name": "public_domain",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "6f22b681874e22d122f1a3f51895193f99e077d34c4a3516ecf900db1dc47cc5"
+}

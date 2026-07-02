@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Un seul run par ref : annule les runs obsolètes quand on repush.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Les macros sqlx::query! se compilent contre le cache `.sqlx/` committé,
+  # jamais contre une DB live. Aucun DATABASE_URL requis en CI.
+  SQLX_OFFLINE: "true"
+
+jobs:
+  # Gate rapide : formatage, lint, et suite de tests offline.
+  check:
+    name: fmt + clippy + tests (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain stable (+ rustfmt, clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test (offline, #[ignore] exclus)
+        run: cargo test
+
+  # E2E : pipeline réel (git + Docker). Ne tourne que si le gate rapide est vert.
+  e2e:
+    name: E2E (Docker)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test -- --ignored (deploy / stop / restart / pipeline_e2e)
+        run: cargo test -- --ignored
