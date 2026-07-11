@@ -9,7 +9,7 @@ mod state;
 mod pipeline_e2e;
 
 use crate::state::AppState;
-use axum::{routing::get, routing::post, Json, Router};
+use axum::{routing::delete, routing::get, routing::post, Json, Router};
 use bollard::Docker;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -76,7 +76,7 @@ fn app(state: AppState) -> Router {
         )
         .route(
             "/api/projects/{id}/apps/{app_id}",
-            get(routes::apps::get_app).delete(routes::apps::delete_app),
+            get(routes::apps::get_app),
         )
         .route(
             "/api/projects/{id}/apps/{app_id}/env",
@@ -86,6 +86,7 @@ fn app(state: AppState) -> Router {
             "/api/projects/{id}/apps/{app_id}/env/{key}",
             get(routes::env_vars::get_env).delete(routes::env_vars::delete_env),
         )
+        .route("/api/apps/{id}", delete(routes::apps::delete_app))
         .route("/api/apps/{id}/deploy", post(routes::apps::deploy_app))
         .route("/api/apps/{id}/stop", post(routes::apps::stop_app))
         .route("/api/apps/{id}/restart", post(routes::apps::restart_app))

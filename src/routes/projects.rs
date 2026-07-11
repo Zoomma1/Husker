@@ -1,6 +1,7 @@
 use crate::docker;
 use crate::errors::AppError;
 use crate::extractors::{non_blank, ValidatedJson};
+use crate::routes::apps::App;
 use crate::state::AppState;
 use axum::http::StatusCode;
 use axum::{
@@ -109,6 +110,21 @@ pub async fn delete_project(
         Some(p) => p,
         None => return Err(AppError::NotFound),
     };
+
+    // Cascade : détruire chaque app (container + volume `data/` + ligne DB) AVANT le network.
+    // Sans ça, `delete_network` échoue sur `network has active endpoints` tant qu'un container
+    // — même stoppé — reste attaché. Zéro logique Docker dupliquée : on réutilise `destroy_app`.
+    let apps = sqlx::query_as!(
+        App,
+        "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
+         FROM apps WHERE project_id = ?",
+        project.id
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    for app in &apps {
+        crate::routes::apps::destroy_app(&state, app, &project).await?;
+    }
 
     match docker::network::delete_network(&state.docker, &project.network_name).await {
         Ok(_) => {}
