@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bollard::query_parameters::RemoveContainerOptionsBuilder;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -147,43 +148,90 @@ pub async fn get_app(
     }
 }
 
+/// `DELETE /api/apps/{id}` — route flat (cohérente avec deploy/stop/restart, HUSKER-17).
+/// Destruction complète de l'app : stop + remove du container, suppression du volume `data/`,
+/// puis suppression de la ligne DB. 404 si l'app n'existe pas ; 204 sinon.
 pub async fn delete_app(
-    Path((project_id, app_id)): Path<(i64, i64)>,
+    Path(app_id): Path<i64>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
-    let project = sqlx::query_as!(
-        Project,
-        "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
-        project_id
-    )
-    .fetch_optional(&state.pool)
-    .await?;
-
-    if project.is_none() {
-        return Err(AppError::NotFound);
-    }
-
     let app = sqlx::query_as!(
         App,
         "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
-         FROM apps WHERE id = ? AND project_id = ?",
-        app_id,
-        project_id
-    ).fetch_optional(&state.pool).await?;
-
-    if app.is_none() {
-        return Err(AppError::NotFound);
-    }
-
-    sqlx::query!(
-        "DELETE FROM apps WHERE id = ? AND project_id = ?",
-        app_id,
-        project_id
+         FROM apps WHERE id = ?",
+        app_id
     )
-    .execute(&state.pool)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let project = sqlx::query_as!(
+        Project,
+        "SELECT id, name, network_name, created_at FROM projects WHERE id = ?",
+        app.project_id
+    )
+    .fetch_one(&state.pool)
     .await?;
 
+    destroy_app(&state, &app, &project).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Primitive de destruction d'une app, partagée par le handler flat `delete_app` et la
+/// cascade `delete_project`. Ordre : stop + remove du container (force) -> suppression du
+/// bind mount `data/` -> suppression de la ligne DB.
+///
+/// **Idempotent** : container absent (404 Docker) ou dossier `data/` absent -> traités comme
+/// des succès. Une app jamais déployée est donc supprimée sans erreur (DB uniquement).
+pub async fn destroy_app(state: &AppState, app: &App, project: &Project) -> Result<(), AppError> {
+    // Garde défensive : `project.name` et `app.name` composent le chemin fs supprimé par
+    // `remove_dir_all` plus bas. Les noms ne sont pas encore restreints à la création
+    // (validation `non_blank` seule) ; un nom contenant un séparateur, `..` ou absolu
+    // échapperait le data root et détruirait un dossier hors zone. On refuse AVANT tout
+    // effet de bord. (Validation des noms à la source = HUSKER-19.)
+    if !is_safe_path_segment(&project.name) || !is_safe_path_segment(&app.name) {
+        return Err(AppError::Deploy(format!(
+            "nom projet/app non sûr pour la suppression du volume: {}/{}",
+            project.name, app.name
+        )));
+    }
+
+    // 1. stop + remove du container (force = kill puis rm). 404 = déjà absent -> idempotent.
+    let name = crate::deploy::run::container_name(&project.name, &app.name);
+    let opts = RemoveContainerOptionsBuilder::default().force(true).build();
+    match state.docker.remove_container(&name, Some(opts)).await {
+        Ok(_) => {}
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {}
+        Err(e) => return Err(AppError::Docker(e)),
+    }
+
+    // 2. suppression du bind mount `data/` de l'app. Absent -> idempotent.
+    let data_root = std::env::var("HUSKER_DATA_ROOT").unwrap_or_else(|_| "data".to_string());
+    let dir = crate::deploy::run::data_dir(&data_root, &project.name, &app.name);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(AppError::Deploy(format!("remove data dir: {e}"))),
+    }
+
+    // 3. suppression DB, enfants avant parent : `env_vars` n'a pas d'`ON DELETE CASCADE` et
+    //    `PRAGMA foreign_keys` est OFF -> sans ce DELETE, les env vars deviendraient orphelines.
+    sqlx::query!("DELETE FROM env_vars WHERE app_id = ?", app.id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query!("DELETE FROM apps WHERE id = ?", app.id)
+        .execute(&state.pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Un nom de projet/app doit être un segment de chemin unique. Sinon il pourrait échapper le
+/// data root lors du `remove_dir_all` de `destroy_app` (séparateur, `..`, chemin absolu).
+fn is_safe_path_segment(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\\')
 }
 
 /// `POST /api/apps/{id}/deploy` — route flat (dérogation au nested CRUD, cf. refine).

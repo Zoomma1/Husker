@@ -1,21 +1,19 @@
 //! Test E2E « pipeline complet » d'une app, piloté par l'API HTTP réelle (`crate::app`)
 //! contre Docker + git réels : création projet → création app → deploy → stop →
-//! suppression du container → nettoyage (delete app + delete project).
+//! destroy (delete app : stop+remove container + volume `data/`) → delete project (network).
 //!
 //! Complémentaire aux E2E unitaires de `deploy.rs` (qui appellent `deploy`/`stop`/`restart`
 //! directement) : ici on traverse le routeur de production de bout en bout.
 //!
-//! ⚠️ Gap lifecycle exposé par ce test : aucun endpoint ne supprime le container.
-//! `delete_app` ne nettoie que la DB (le container reste orphelin) et `delete_project`
-//! échouerait sur un network encore peuplé. La suppression du container se fait donc via
-//! le client Docker — à transformer en endpoint en M4.
+//! Le gap lifecycle historique (aucun endpoint ne supprimait le container) est comblé par
+//! HUSKER-17 : `DELETE /api/apps/{id}` détruit container + `data/` + ligne DB, et
+//! `delete_project` cascade dessus avant de retirer le network.
 //!
 //! Les helpers git/tmp sont volontairement locaux (fichier isolé, hors scope HUSKER-14) ;
 //! à factoriser dans un module de test partagé si d'autres E2E HTTP apparaissent.
 
 use axum::body::Body;
 use axum::http;
-use bollard::query_parameters::RemoveContainerOptionsBuilder;
 use git2::{Repository, Signature};
 use serde_json::json;
 use std::fs;
@@ -170,14 +168,18 @@ async fn full_lifecycle_create_deploy_stop_remove() {
         "container arrêté (pas supprimé)"
     );
 
-    // 5. SUPPRESSION du container — pas d'endpoint dédié (gap M4) : via le client Docker.
-    docker
-        .remove_container(
-            &container,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-        )
-        .await
-        .expect("suppression du container");
+    // 5. DESTROY via l'endpoint `DELETE /api/apps/{id}` (HUSKER-17) : stop + remove du
+    //    container + suppression du volume `data/` + ligne DB. Plus de remove manuel.
+    let data_dir = tmp
+        .path()
+        .join("data")
+        .join(&project_name)
+        .join(app_name)
+        .join("data");
+    assert!(data_dir.exists(), "le volume data/ existe après le deploy");
+
+    let (status, _) = send(&ctx, "DELETE", &format!("/api/apps/{app_id}"), None).await;
+    assert_eq!(status, 204, "delete app (destroy)");
     assert!(
         matches!(
             docker.inspect_container(&container, None).await,
@@ -186,22 +188,96 @@ async fn full_lifecycle_create_deploy_stop_remove() {
                 ..
             })
         ),
-        "container effectivement supprimé"
+        "container supprimé par l'endpoint destroy"
+    );
+    assert!(
+        !data_dir.exists(),
+        "le volume data/ est supprimé par destroy"
     );
 
-    // 6. NETTOYAGE des ressources : delete app (DB) puis delete project (supprime le network).
-    let (status, _) = send(
-        &ctx,
-        "DELETE",
-        &format!("/api/projects/{project_id}/apps/{app_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, 204, "delete app");
+    // 6. NETTOYAGE du projet : delete project cascade (network libéré une fois l'app détruite).
     let (status, _) = send(&ctx, "DELETE", &format!("/api/projects/{project_id}"), None).await;
     assert_eq!(status, 204, "delete project");
     assert!(
         docker.inspect_network(&network, None).await.is_err(),
         "le network doit être supprimé avec le projet"
     );
+}
+
+/// Cascade directe : `DELETE /api/projects/{id}` sur un projet dont l'app a un container
+/// **vivant**. C'est le bug motivant HUSKER-17 (`network has active endpoints`) : sans la
+/// cascade qui détruit d'abord le container, `delete_network` échouerait. On saute l'étape
+/// destroy-app explicite pour éprouver ce chemin.
+#[tokio::test]
+#[ignore = "Docker+git réels : delete project cascade sur une app déployée — cargo test -- --ignored"]
+async fn delete_project_cascades_over_running_app() {
+    let _guard = ENV_ROOTS_LOCK.lock().await;
+    let tmp = TmpDir::new();
+    set_roots(&tmp);
+
+    let (_sha, branch) = init_repo_with_dockerfile(&tmp.path().join("repo"), RUNNING_DOCKERFILE);
+    let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+    let ctx = TestApp::new().await;
+    let docker = ctx.docker.clone();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let project_name = format!("casc{}", &suffix[..12]);
+    let app_name = "web";
+    let network = format!("husker_{project_name}");
+    let container = format!("husker_{project_name}_{app_name}");
+
+    // Setup : projet + app + deploy -> container attaché au network du projet.
+    let (status, project) = send(
+        &ctx,
+        "POST",
+        "/api/projects",
+        Some(json!({"name": project_name})),
+    )
+    .await;
+    assert_eq!(status, 201, "création projet");
+    let project_id = project["id"].as_i64().expect("project id");
+
+    let (status, app) = send(
+        &ctx,
+        "POST",
+        &format!("/api/projects/{project_id}/apps"),
+        Some(json!({"name": app_name, "git_url": git_url, "git_branch": branch})),
+    )
+    .await;
+    assert_eq!(status, 201, "création app");
+    let app_id = app["id"].as_i64().expect("app id");
+
+    let (status, _) = send(&ctx, "POST", &format!("/api/apps/{app_id}/deploy"), None).await;
+    assert_eq!(status, 200, "deploy");
+    assert!(
+        docker.inspect_container(&container, None).await.is_ok(),
+        "container up avant le delete project"
+    );
+
+    // DELETE project SANS destroy préalable : la cascade doit stop+remove le container
+    // (sinon `network has active endpoints`) puis retirer le network.
+    let data_dir = tmp
+        .path()
+        .join("data")
+        .join(&project_name)
+        .join(app_name)
+        .join("data");
+    let (status, _) = send(&ctx, "DELETE", &format!("/api/projects/{project_id}"), None).await;
+    assert_eq!(status, 204, "delete project cascade");
+    assert!(
+        matches!(
+            docker.inspect_container(&container, None).await,
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404,
+                ..
+            })
+        ),
+        "container détruit par la cascade"
+    );
+    assert!(
+        docker.inspect_network(&network, None).await.is_err(),
+        "network supprimé par la cascade"
+    );
+    assert!(!data_dir.exists(), "volume data/ supprimé par la cascade");
 }
