@@ -9,7 +9,9 @@
 //! Un build raté ne touche jamais le container qui tourne (cf. ADR à créer).
 
 pub mod build;
+pub mod digests;
 pub mod git;
+pub mod policy;
 pub mod run;
 
 use crate::errors::AppError;
@@ -83,19 +85,33 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
             .await
             .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
 
-    // 2. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
+    // 2. politique supply-chain sur les `FROM` du Dockerfile cloné (HUSKER-15). Placée avant
+    //    le build : rien n'a encore été tiré d'un registry à ce stade. Un registry hors
+    //    allowlist refuse le deploy (422) ; une base non pinnée est seulement signalée.
+    let base_images = policy::read_base_images(&dest, &app.dockerfile_path)?;
+    for warning in policy::check(&base_images, &policy::allowed_registries())? {
+        tracing::warn!(app = %app.name, "supply-chain : {warning}");
+    }
+
+    // Puis la détection de dérive : ce que les tags résolvent aujourd'hui vs au deploy
+    // précédent. Best-effort — un registry injoignable ne fait pas échouer le deploy.
+    for warning in digests::track(&state.pool, &state.docker, app.id, &base_images).await {
+        tracing::warn!(app = %app.name, "supply-chain : {warning}");
+    }
+
+    // 3. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
     //    pas le container qui tourne).
     let image = build::image_ref(&project.name, &app.name, &sha);
     let context = build::make_context_targz(&dest)?;
     build::build_with_buildkit(&state.docker, context, &image, &app.dockerfile_path).await?;
 
-    // 3. env vars depuis la DB.
+    // 4. env vars depuis la DB.
     let env_rows = sqlx::query!("SELECT key, value FROM env_vars WHERE app_id = ?", app.id)
         .fetch_all(&state.pool)
         .await?;
     let env: Vec<(String, String)> = env_rows.into_iter().map(|r| (r.key, r.value)).collect();
 
-    // 4. run du nouveau container (stop old + run new dans run_container).
+    // 5. run du nouveau container (stop old + run new dans run_container).
     let data_root = std::env::var("HUSKER_DATA_ROOT").unwrap_or_else(|_| "data".to_string());
     let data_abs = run::prepare_data_dir(&data_root, &project.name, &app.name)?;
     let name = run::container_name(&project.name, &app.name);

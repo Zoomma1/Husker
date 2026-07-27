@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT digest, first_seen_at FROM base_image_digests",
+  "describe": {
+    "columns": [
+      {
+        "name": "digest",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "first_seen_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d45b03eca6be0727802f9bf006ce0454fe9a781b1cc82eb0212567522c6e0957"
+}

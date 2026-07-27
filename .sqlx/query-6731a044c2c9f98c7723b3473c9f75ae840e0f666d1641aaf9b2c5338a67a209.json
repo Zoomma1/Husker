@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO base_image_digests (app_id, reference, digest, first_seen_at, last_seen_at)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT(app_id, reference)\n         DO UPDATE SET digest = excluded.digest, last_seen_at = excluded.last_seen_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "6731a044c2c9f98c7723b3473c9f75ae840e0f666d1641aaf9b2c5338a67a209"
+}

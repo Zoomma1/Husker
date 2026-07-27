@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT digest FROM base_image_digests WHERE app_id = ? AND reference = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "digest",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0cfa81aef18505fc4a35ba979aa023d8d1330f7604286f41919ff54334728a56"
+}

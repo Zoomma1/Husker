@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO apps (project_id, name, git_url, git_branch, dockerfile_path, created_at, status)\n             VALUES (1, 'b', 'url', 'main', 'Dockerfile', 'now', 'pending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e1b13087f5635f8ecda3be2db95e9f4a2194337a018829d5857b5422ea2f543c"
+}
