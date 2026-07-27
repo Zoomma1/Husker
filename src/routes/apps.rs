@@ -221,6 +221,12 @@ pub async fn destroy_app(state: &AppState, app: &App, project: &Project) -> Resu
     sqlx::query!("DELETE FROM env_vars WHERE app_id = ?", app.id)
         .execute(&state.pool)
         .await?;
+    // Idem pour l'historique des digests (HUSKER-15) : SQLite réattribue les rowid libérés,
+    // une ligne orpheline serait héritée par une future app et déclencherait une fausse
+    // alerte de dérive.
+    sqlx::query!("DELETE FROM base_image_digests WHERE app_id = ?", app.id)
+        .execute(&state.pool)
+        .await?;
     sqlx::query!("DELETE FROM apps WHERE id = ?", app.id)
         .execute(&state.pool)
         .await?;

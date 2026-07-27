@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO projects (name, network_name, created_at) VALUES ('p', 'husker_p', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e509333ed196b07af3272da521d5677d5782447de26ccee6bac011474fef30ce"
+}
