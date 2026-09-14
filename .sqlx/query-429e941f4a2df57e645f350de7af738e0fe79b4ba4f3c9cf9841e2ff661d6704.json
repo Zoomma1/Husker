@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM deployment_signals\n         WHERE deployment_id IN (SELECT id FROM deployments WHERE app_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "429e941f4a2df57e645f350de7af738e0fe79b4ba4f3c9cf9841e2ff661d6704"
+}
