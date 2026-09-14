@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.kind, s.message FROM deployment_signals s\n             JOIN deployments d ON d.id = s.deployment_id\n             WHERE d.app_id = ? ORDER BY s.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "message",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6007f66d39f15dcf8a7c20b62208cf5b41caecf9dc23aeea14b8889f3b213a92"
+}

@@ -42,14 +42,24 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
     .fetch_one(&state.pool)
     .await?;
 
-    match run_pipeline(state, &app, &project).await {
+    // Ouvre la ligne `deployments` (HUSKER-21) : une par tentative, `building` tant que
+    // le pipeline tourne. Son id rattache les signaux sécu émis pendant le pipeline.
+    let deployment_id = open_deployment(&state.pool, app_id).await?;
+
+    match run_pipeline(state, &app, &project, deployment_id).await {
         Ok(_sha) => {
+            // best-effort : le container tourne, une clôture DB ratée ne doit pas le déguiser
+            // en 502 ni empêcher le passage de l'app en `running`.
+            if let Err(e) = close_deployment(&state.pool, deployment_id, "success").await {
+                tracing::error!(deployment_id, "clôture deployments (success) : {e}");
+            }
             sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await?;
         }
         Err(e) => {
             // best-effort : on n'écrase pas l'erreur d'origine si l'UPDATE échoue aussi.
+            let _ = close_deployment(&state.pool, deployment_id, "failed").await;
             let _ = sqlx::query!("UPDATE apps SET status = 'failed' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await;
@@ -72,7 +82,12 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
 /// Le pipeline proprement dit. Renvoie le `sha` déployé en cas de succès.
 /// Ordre « build d'abord » : `run::run_container` (qui supprime l'ancien container) n'est
 /// atteint que si git ET build ont réussi.
-async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<String, AppError> {
+async fn run_pipeline(
+    state: &AppState,
+    app: &App,
+    project: &Project,
+    deployment_id: i64,
+) -> Result<String, AppError> {
     // 1. git clone/pull — git2 est synchrone : on le sort du runtime async via spawn_blocking.
     let sources_root =
         std::env::var("HUSKER_SOURCES_ROOT").unwrap_or_else(|_| "sources".to_string());
@@ -84,19 +99,29 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
         tokio::task::spawn_blocking(move || git::clone_or_update(&url, &branch, &dest_for_git))
             .await
             .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
+    sqlx::query!(
+        "UPDATE deployments SET git_sha = ? WHERE id = ?",
+        sha,
+        deployment_id
+    )
+    .execute(&state.pool)
+    .await?;
 
     // 2. politique supply-chain sur les `FROM` du Dockerfile cloné (HUSKER-15). Placée avant
     //    le build : rien n'a encore été tiré d'un registry à ce stade. Un registry hors
     //    allowlist refuse le deploy (422) ; une base non pinnée est seulement signalée.
+    //    Chaque warning est persisté en `deployment_signals` (ADR-020 : le log seul se perd).
     let base_images = policy::read_base_images(&dest, &app.dockerfile_path)?;
     for warning in policy::check(&base_images, &policy::allowed_registries())? {
         tracing::warn!(app = %app.name, "supply-chain : {warning}");
+        record_signal(&state.pool, deployment_id, "policy", &warning).await;
     }
 
     // Puis la détection de dérive : ce que les tags résolvent aujourd'hui vs au deploy
     // précédent. Best-effort — un registry injoignable ne fait pas échouer le deploy.
     for warning in digests::track(&state.pool, &state.docker, app.id, &base_images).await {
         tracing::warn!(app = %app.name, "supply-chain : {warning}");
+        record_signal(&state.pool, deployment_id, "digest_drift", &warning).await;
     }
 
     // 3. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
@@ -120,6 +145,58 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
     run::run_container(&state.docker, &name, config).await?;
 
     Ok(sha)
+}
+
+/// Ouvre une ligne `deployments` en `building` ; renvoie son id (HUSKER-21).
+async fn open_deployment(pool: &sqlx::SqlitePool, app_id: i64) -> Result<i64, AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = sqlx::query!(
+        "INSERT INTO deployments (app_id, status, started_at) VALUES (?, 'building', ?)",
+        app_id,
+        now
+    )
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+/// Clôt la ligne `deployments` : `status` final (`success` | `failed`) + `finished_at`.
+async fn close_deployment(
+    pool: &sqlx::SqlitePool,
+    deployment_id: i64,
+    status: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query!(
+        "UPDATE deployments SET status = ?, finished_at = ? WHERE id = ?",
+        status,
+        now,
+        deployment_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Persiste un signal sécu (warning supply-chain, plus tard CVE) rattaché au déploiement.
+/// Best-effort comme le reste du suivi supply-chain : un INSERT raté ne fait pas échouer le
+/// deploy, mais il est loggé en `error` — un signal perdu en silence serait le défaut
+/// qu'ADR-020 combat.
+async fn record_signal(pool: &sqlx::SqlitePool, deployment_id: i64, kind: &str, message: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query!(
+        "INSERT INTO deployment_signals (deployment_id, kind, message, created_at) VALUES (?, ?, ?, ?)",
+        deployment_id,
+        kind,
+        message,
+        now
+    )
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        tracing::error!(deployment_id, kind, "signal non persisté : {e}");
+    }
 }
 
 /// Résultat d'un `stop` : container effectivement arrêté, ou déjà arrêté (304 Docker).
