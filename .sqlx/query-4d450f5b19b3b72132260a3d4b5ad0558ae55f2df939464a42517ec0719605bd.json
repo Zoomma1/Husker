@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, git_sha, finished_at FROM deployments WHERE app_id = ? ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "git_sha",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "finished_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "4d450f5b19b3b72132260a3d4b5ad0558ae55f2df939464a42517ec0719605bd"
+}

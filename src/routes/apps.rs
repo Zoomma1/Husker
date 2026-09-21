@@ -216,8 +216,9 @@ pub async fn destroy_app(state: &AppState, app: &App, project: &Project) -> Resu
         Err(e) => return Err(AppError::Deploy(format!("remove data dir: {e}"))),
     }
 
-    // 3. suppression DB, enfants avant parent : `env_vars` n'a pas d'`ON DELETE CASCADE` et
-    //    `PRAGMA foreign_keys` est OFF -> sans ce DELETE, les env vars deviendraient orphelines.
+    // 3. suppression DB, enfants avant parent : pas d'`ON DELETE CASCADE` dans le schéma, et
+    //    sqlx active `PRAGMA foreign_keys` par défaut -> un enfant oublié fait échouer le
+    //    DELETE du parent (constraint failed).
     sqlx::query!("DELETE FROM env_vars WHERE app_id = ?", app.id)
         .execute(&state.pool)
         .await?;
@@ -225,6 +226,18 @@ pub async fn destroy_app(state: &AppState, app: &App, project: &Project) -> Resu
     // une ligne orpheline serait héritée par une future app et déclencherait une fausse
     // alerte de dérive.
     sqlx::query!("DELETE FROM base_image_digests WHERE app_id = ?", app.id)
+        .execute(&state.pool)
+        .await?;
+    // Historique de déploiement (HUSKER-21) : les signaux référencent `deployments`, qui
+    // référence `apps` -> petits-enfants d'abord.
+    sqlx::query!(
+        "DELETE FROM deployment_signals
+         WHERE deployment_id IN (SELECT id FROM deployments WHERE app_id = ?)",
+        app.id
+    )
+    .execute(&state.pool)
+    .await?;
+    sqlx::query!("DELETE FROM deployments WHERE app_id = ?", app.id)
         .execute(&state.pool)
         .await?;
     sqlx::query!("DELETE FROM apps WHERE id = ?", app.id)

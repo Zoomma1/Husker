@@ -42,14 +42,24 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
     .fetch_one(&state.pool)
     .await?;
 
-    match run_pipeline(state, &app, &project).await {
+    // Ouvre la ligne `deployments` (HUSKER-21) : une par tentative, `building` tant que
+    // le pipeline tourne. Son id rattache les signaux sécu émis pendant le pipeline.
+    let deployment_id = open_deployment(&state.pool, app_id).await?;
+
+    match run_pipeline(state, &app, &project, deployment_id).await {
         Ok(_sha) => {
+            // best-effort : le container tourne, une clôture DB ratée ne doit pas le déguiser
+            // en 502 ni empêcher le passage de l'app en `running`.
+            if let Err(e) = close_deployment(&state.pool, deployment_id, "success").await {
+                tracing::error!(deployment_id, "clôture deployments (success) : {e}");
+            }
             sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await?;
         }
         Err(e) => {
             // best-effort : on n'écrase pas l'erreur d'origine si l'UPDATE échoue aussi.
+            let _ = close_deployment(&state.pool, deployment_id, "failed").await;
             let _ = sqlx::query!("UPDATE apps SET status = 'failed' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await;
@@ -72,7 +82,12 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
 /// Le pipeline proprement dit. Renvoie le `sha` déployé en cas de succès.
 /// Ordre « build d'abord » : `run::run_container` (qui supprime l'ancien container) n'est
 /// atteint que si git ET build ont réussi.
-async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<String, AppError> {
+async fn run_pipeline(
+    state: &AppState,
+    app: &App,
+    project: &Project,
+    deployment_id: i64,
+) -> Result<String, AppError> {
     // 1. git clone/pull — git2 est synchrone : on le sort du runtime async via spawn_blocking.
     let sources_root =
         std::env::var("HUSKER_SOURCES_ROOT").unwrap_or_else(|_| "sources".to_string());
@@ -84,19 +99,29 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
         tokio::task::spawn_blocking(move || git::clone_or_update(&url, &branch, &dest_for_git))
             .await
             .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
+    sqlx::query!(
+        "UPDATE deployments SET git_sha = ? WHERE id = ?",
+        sha,
+        deployment_id
+    )
+    .execute(&state.pool)
+    .await?;
 
     // 2. politique supply-chain sur les `FROM` du Dockerfile cloné (HUSKER-15). Placée avant
     //    le build : rien n'a encore été tiré d'un registry à ce stade. Un registry hors
     //    allowlist refuse le deploy (422) ; une base non pinnée est seulement signalée.
+    //    Chaque warning est persisté en `deployment_signals` (ADR-020 : le log seul se perd).
     let base_images = policy::read_base_images(&dest, &app.dockerfile_path)?;
     for warning in policy::check(&base_images, &policy::allowed_registries())? {
         tracing::warn!(app = %app.name, "supply-chain : {warning}");
+        record_signal(&state.pool, deployment_id, "policy", &warning).await;
     }
 
     // Puis la détection de dérive : ce que les tags résolvent aujourd'hui vs au deploy
     // précédent. Best-effort — un registry injoignable ne fait pas échouer le deploy.
     for warning in digests::track(&state.pool, &state.docker, app.id, &base_images).await {
         tracing::warn!(app = %app.name, "supply-chain : {warning}");
+        record_signal(&state.pool, deployment_id, "digest_drift", &warning).await;
     }
 
     // 3. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
@@ -120,6 +145,58 @@ async fn run_pipeline(state: &AppState, app: &App, project: &Project) -> Result<
     run::run_container(&state.docker, &name, config).await?;
 
     Ok(sha)
+}
+
+/// Ouvre une ligne `deployments` en `building` ; renvoie son id (HUSKER-21).
+async fn open_deployment(pool: &sqlx::SqlitePool, app_id: i64) -> Result<i64, AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let id = sqlx::query!(
+        "INSERT INTO deployments (app_id, status, started_at) VALUES (?, 'building', ?)",
+        app_id,
+        now
+    )
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+/// Clôt la ligne `deployments` : `status` final (`success` | `failed`) + `finished_at`.
+async fn close_deployment(
+    pool: &sqlx::SqlitePool,
+    deployment_id: i64,
+    status: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query!(
+        "UPDATE deployments SET status = ?, finished_at = ? WHERE id = ?",
+        status,
+        now,
+        deployment_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Persiste un signal sécu (warning supply-chain, plus tard CVE) rattaché au déploiement.
+/// Best-effort comme le reste du suivi supply-chain : un INSERT raté ne fait pas échouer le
+/// deploy, mais il est loggé en `error` — un signal perdu en silence serait le défaut
+/// qu'ADR-020 combat.
+async fn record_signal(pool: &sqlx::SqlitePool, deployment_id: i64, kind: &str, message: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query!(
+        "INSERT INTO deployment_signals (deployment_id, kind, message, created_at) VALUES (?, ?, ?, ?)",
+        deployment_id,
+        kind,
+        message,
+        now
+    )
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        tracing::error!(deployment_id, kind, "signal non persisté : {e}");
+    }
 }
 
 /// Résultat d'un `stop` : container effectivement arrêté, ou déjà arrêté (304 Docker).
@@ -288,22 +365,7 @@ mod tests {
 
     /// (Re)commit le `Dockerfile` avec `content` sur le HEAD courant ; renvoie le sha produit.
     fn commit_dockerfile(repo: &Repository, content: &str, msg: &str) -> String {
-        let wd = repo.workdir().unwrap();
-        fs::write(wd.join("Dockerfile"), content).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("Dockerfile")).unwrap();
-        index.write().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        let sig = Signature::now("husker-test", "test@husker").unwrap();
-        let parents: Vec<git2::Commit> = match repo.head() {
-            Ok(h) => vec![h.peel_to_commit().unwrap()],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
-            .unwrap()
-            .to_string()
+        commit_file(repo, "Dockerfile", content, msg)
     }
 
     /// Noms uniques pour ne pas collisionner entre runs ; renvoie (project, app, network).
@@ -377,6 +439,60 @@ mod tests {
             .unwrap()
     }
 
+    /// Ligne `deployments` observée (HUSKER-21) : (status, git_sha, finished_at).
+    struct DeploymentRow {
+        status: String,
+        git_sha: Option<String>,
+        finished_at: Option<String>,
+    }
+
+    async fn deployments_of(pool: &SqlitePool, app_id: i64) -> Vec<DeploymentRow> {
+        sqlx::query_as!(
+            DeploymentRow,
+            "SELECT status, git_sha, finished_at FROM deployments WHERE app_id = ? ORDER BY id",
+            app_id
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Signaux persistés pour une app, via son/ses déploiements : (kind, message).
+    async fn signals_of(pool: &SqlitePool, app_id: i64) -> Vec<(String, String)> {
+        sqlx::query!(
+            "SELECT s.kind, s.message FROM deployment_signals s
+             JOIN deployments d ON d.id = s.deployment_id
+             WHERE d.app_id = ? ORDER BY s.id",
+            app_id
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.kind, r.message))
+        .collect()
+    }
+
+    /// Commit un fichier arbitraire (pour un repo fixture SANS Dockerfile, ou nommé autrement).
+    fn commit_file(repo: &Repository, file: &str, content: &str, msg: &str) -> String {
+        let wd = repo.workdir().unwrap();
+        fs::write(wd.join(file), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = Signature::now("husker-test", "test@husker").unwrap();
+        let parents: Vec<git2::Commit> = match repo.head() {
+            Ok(h) => vec![h.peel_to_commit().unwrap()],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap()
+            .to_string()
+    }
+
     /// Cleanup best-effort : container -> network -> image(s) buildée(s).
     async fn cleanup(docker: &Docker, project: &str, app: &str, network: &str, shas: &[&str]) {
         let container = run::container_name(project, app);
@@ -448,6 +564,101 @@ mod tests {
             "failed",
             "status DB doit passer à failed"
         );
+
+        // HUSKER-21 : une ligne `deployments` close en failed, sans sha (échec avant le clone).
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(rows.len(), 1, "exactement une ligne deployments");
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].git_sha, None, "pas de sha : git a échoué");
+        assert!(
+            rows[0].finished_at.is_some(),
+            "finished_at renseigné à la clôture"
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_missing_dockerfile_records_failed_with_sha() {
+        // 2e étape d'échec distincte : git OK (repo local), puis lecture du Dockerfile KO.
+        // Offline : aucune image tirée, Docker jamais contacté.
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let pool = test_pool().await;
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha = commit_file(&repo, "README.md", "no dockerfile here\n", "init");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker: Docker::connect_with_local_defaults().unwrap(),
+        };
+
+        let result = deploy(&state, app_id).await;
+
+        assert!(
+            matches!(result, Err(AppError::Deploy(_))),
+            "Dockerfile absent -> Deploy"
+        );
+        assert_eq!(app_status(&pool, app_id).await, "failed");
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(rows.len(), 1, "exactement une ligne deployments");
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(
+            rows[0].git_sha.as_deref(),
+            Some(sha.as_str()),
+            "le sha est posé dès le clone, même si le pipeline échoue après"
+        );
+        assert!(rows[0].finished_at.is_some());
+        assert!(
+            signals_of(&pool, app_id).await.is_empty(),
+            "aucun signal sans Dockerfile"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_warning_is_persisted_as_deployment_signal() {
+        // `FROM $BASE` : signalé par la policy (allowlist inapplicable), ignoré par le suivi
+        // de digests (non résoluble). Le build échoue ensuite (ARG vide / daemon absent) :
+        // le signal doit survivre à l'échec du deploy — c'est tout l'objet d'ADR-020.
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let pool = test_pool().await;
+        let repo = init_repo(&tmp.path().join("repo"));
+        commit_dockerfile(&repo, "FROM $BASE\n", "arg base");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState {
+            pool: pool.clone(),
+            docker: Docker::connect_with_local_defaults().unwrap(),
+        };
+
+        let result = deploy(&state, app_id).await;
+        assert!(
+            result.is_err(),
+            "un `FROM $BASE` sans ARG ne peut pas se builder"
+        );
+
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+
+        let signals = signals_of(&pool, app_id).await;
+        assert_eq!(signals.len(), 1, "un signal policy : {signals:?}");
+        assert_eq!(signals[0].0, "policy");
+        assert!(
+            signals[0].1.contains("non résoluble (ARG)"),
+            "message du warning conservé tel quel : {}",
+            signals[0].1
+        );
     }
 
     // --- E2E (git + Docker réels, #[ignore]) ---
@@ -482,6 +693,21 @@ mod tests {
 
         let deployed = result.expect("deploy doit réussir");
         assert_eq!(deployed.status, "running", "status DB -> running");
+
+        // HUSKER-21 : une ligne `deployments` en success, complète.
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(rows.len(), 1, "exactement une ligne deployments");
+        assert_eq!(rows[0].status, "success");
+        assert_eq!(rows[0].git_sha.as_deref(), Some(sha.as_str()));
+        assert!(rows[0].finished_at.is_some());
+        // `alpine:3.20` non pinné -> warning policy persisté, relisible sans les logs.
+        let signals = signals_of(&pool, app_id).await;
+        assert!(
+            signals
+                .iter()
+                .any(|(k, m)| k == "policy" && m.contains("non pinnée")),
+            "signal policy attendu : {signals:?}"
+        );
 
         let info = inspect.expect("container inspectable");
         assert_eq!(
@@ -642,6 +868,18 @@ mod tests {
         r1.expect("deploy 1 ok");
         assert!(r2.is_err(), "le build raté doit faire échouer le redeploy");
         assert_eq!(status, "failed", "status DB -> failed");
+
+        // HUSKER-21 : l'historique garde les deux tentatives, dans l'ordre.
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(rows.len(), 2, "deux lignes deployments (une par tentative)");
+        assert_eq!(
+            (rows[0].status.as_str(), rows[0].git_sha.as_deref()),
+            ("success", Some(sha1.as_str()))
+        );
+        assert_eq!(
+            (rows[1].status.as_str(), rows[1].git_sha.as_deref()),
+            ("failed", Some(sha2.as_str()))
+        );
 
         // « build d'abord » : l'ancien container (sha1) tourne TOUJOURS, intact.
         let info = inspect.expect("ancien container toujours présent");
