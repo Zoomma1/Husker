@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH matched AS (\n            SELECT id, status, git_sha, started_at, finished_at, log_path\n            FROM deployments\n            WHERE app_id = ?\n        ),\n        totals AS (\n            SELECT COUNT(*) as total FROM matched\n        ),\n        paged AS (\n            SELECT * FROM matched\n            ORDER BY started_at DESC, id DESC\n            LIMIT ? OFFSET ?\n        )\n        SELECT\n            totals.total as \"total!: i64\",\n            paged.id as \"deployment_id?: i64\",\n            paged.status as \"status?: String\",\n            paged.git_sha as \"git_sha?: String\",\n            paged.started_at as \"started_at?: String\",\n            paged.finished_at as \"finished_at?: String\",\n            paged.log_path as \"log_path?: String\",\n            s.id as \"signal_id?: i64\",\n            s.kind as \"signal_kind?: String\",\n            s.message as \"signal_message?: String\",\n            s.created_at as \"signal_created_at?: String\"\n        FROM totals\n        LEFT JOIN paged ON 1 = 1\n        LEFT JOIN deployment_signals s ON s.deployment_id = paged.id\n        ORDER BY paged.started_at DESC, paged.id DESC, s.id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "total!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "deployment_id?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "git_sha?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "finished_at?: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "log_path?: String",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "signal_id?: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "signal_kind?: String",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "signal_message?: String",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "signal_created_at?: String",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "484b5c4e0e0a2d1c08286a848dc2df1a2b09da057a165d9d459a5b58009411f3"
+}

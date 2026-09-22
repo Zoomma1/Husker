@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deployments (app_id, git_sha, status, started_at, finished_at, log_path)\n         VALUES (?, ?, ?, ?, ?, NULL) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "82c26e5a715e7ff59596b99522b32ba38ea8b7a1309f1b6ce5e4f106713dce74"
+}

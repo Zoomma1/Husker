@@ -399,6 +399,236 @@ async fn test_delete_app_cleans_env_vars() {
     assert!(rows.is_empty(), "les env vars sont supprimées avec l'app");
 }
 
+/// Seed direct SQL d'un déploiement (pas de write path HUSKER-21 dans ce module). Retourne
+/// son id.
+async fn seed_deployment(
+    pool: &sqlx::SqlitePool,
+    app_id: i64,
+    status: &str,
+    git_sha: Option<&str>,
+    started_at: &str,
+    finished_at: Option<&str>,
+) -> i64 {
+    let row = sqlx::query!(
+        "INSERT INTO deployments (app_id, git_sha, status, started_at, finished_at, log_path)
+         VALUES (?, ?, ?, ?, ?, NULL) RETURNING id",
+        app_id,
+        git_sha,
+        status,
+        started_at,
+        finished_at
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    row.id
+}
+
+async fn seed_signal(pool: &sqlx::SqlitePool, deployment_id: i64, kind: &str, message: &str) {
+    let created_at = chrono::Utc::now().to_rfc3339();
+    sqlx::query!(
+        "INSERT INTO deployment_signals (deployment_id, kind, message, created_at) VALUES (?, ?, ?, ?)",
+        deployment_id,
+        kind,
+        message,
+        created_at
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Boilerplate partagé des tests `list_deployments` : requête, statut, bytes bruts. Ne
+/// désérialise pas en `DeploymentsPage` — certains tests (404) n'ont pas ce corps.
+async fn get_deployments_raw(
+    ctx: &TestApp,
+    app_id: i64,
+    query: &str,
+) -> (http::StatusCode, axum::body::Bytes) {
+    let uri = if query.is_empty() {
+        format!("/api/apps/{}/deployments", app_id)
+    } else {
+        format!("/api/apps/{}/deployments?{}", app_id, query)
+    };
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = ctx.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, bytes)
+}
+
+/// Idem `get_deployments_raw`, désérialisé en `DeploymentsPage` — pour les tests 200.
+async fn get_deployments(ctx: &TestApp, app_id: i64, query: &str) -> DeploymentsPage {
+    let (status, bytes) = get_deployments_raw(ctx, app_id, query).await;
+    assert_eq!(status, 200, "attendu 200, body: {:?}", bytes);
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn test_list_deployments_app_not_found() {
+    let ctx = TestApp::new().await;
+
+    let (status, _bytes) = get_deployments_raw(&ctx, 9999999, "").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn test_list_deployments_empty() {
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    let page = get_deployments(&ctx, app_id, "").await;
+
+    assert!(page.data.is_empty());
+    assert_eq!(page.total, 0);
+    assert_eq!(page.limit, 20);
+    assert_eq!(page.offset, 0);
+}
+
+#[tokio::test]
+async fn test_list_deployments_ordered_most_recent_first() {
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    let older = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha_old"),
+        "2026-09-20T10:00:00Z",
+        Some("2026-09-20T10:05:00Z"),
+    )
+    .await;
+    let newer = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "failed",
+        Some("sha_new"),
+        "2026-09-21T10:00:00Z",
+        Some("2026-09-21T10:05:00Z"),
+    )
+    .await;
+
+    let page = get_deployments(&ctx, app_id, "").await;
+
+    assert_eq!(page.total, 2);
+    assert_eq!(page.data.len(), 2);
+    assert_eq!(page.data[0].id, newer);
+    assert_eq!(page.data[0].status, "failed");
+    assert_eq!(page.data[1].id, older);
+    assert_eq!(page.data[1].status, "success");
+}
+
+#[tokio::test]
+async fn test_list_deployments_tie_break_on_same_started_at() {
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    let first = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha_a"),
+        "2026-09-21T10:00:00Z",
+        Some("2026-09-21T10:05:00Z"),
+    )
+    .await;
+    let second = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha_b"),
+        "2026-09-21T10:00:00Z",
+        Some("2026-09-21T10:05:00Z"),
+    )
+    .await;
+
+    let page = get_deployments(&ctx, app_id, "").await;
+
+    assert_eq!(page.data[0].id, second.max(first));
+    assert_eq!(page.data[1].id, second.min(first));
+}
+
+#[tokio::test]
+async fn test_list_deployments_offset_beyond_total() {
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha"),
+        "2026-09-21T10:00:00Z",
+        Some("2026-09-21T10:05:00Z"),
+    )
+    .await;
+
+    let page = get_deployments(&ctx, app_id, "offset=50").await;
+
+    assert!(page.data.is_empty());
+    assert_eq!(page.total, 1);
+    assert_eq!(page.offset, 50);
+}
+
+#[tokio::test]
+async fn test_list_deployments_with_and_without_signals() {
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    let with_signal = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha_with_signal"),
+        "2026-09-21T10:00:00Z",
+        Some("2026-09-21T10:05:00Z"),
+    )
+    .await;
+    seed_signal(&ctx.pool, with_signal, "policy", "base image non pinné").await;
+
+    let without_signal = seed_deployment(
+        &ctx.pool,
+        app_id,
+        "success",
+        Some("sha_no_signal"),
+        "2026-09-20T10:00:00Z",
+        Some("2026-09-20T10:05:00Z"),
+    )
+    .await;
+
+    let page = get_deployments(&ctx, app_id, "").await;
+
+    let entry_with_signal = page.data.iter().find(|d| d.id == with_signal).unwrap();
+    assert_eq!(entry_with_signal.signals.len(), 1);
+    assert_eq!(entry_with_signal.signals[0].kind, "policy");
+    assert_eq!(entry_with_signal.signals[0].message, "base image non pinné");
+
+    let entry_without_signal = page.data.iter().find(|d| d.id == without_signal).unwrap();
+    assert!(entry_without_signal.signals.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_deployments_malformed_query_param_returns_json_error() {
+    // Cohérence de l'enveloppe d'erreur : ValidatedQuery mappe le rejet vers AppError
+    // au lieu du texte brut renvoyé par défaut par axum::extract::Query.
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+
+    let (status, bytes) = get_deployments_raw(&ctx, app_id, "limit=abc").await;
+
+    assert_eq!(status, 400);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.get("error").is_some(), "body: {:?}", body);
+}
+
 #[test]
 fn is_safe_path_segment_rejects_traversal() {
     // Garde anti-échappement du data root dans destroy_app (#1 code-review HUSKER-17).
