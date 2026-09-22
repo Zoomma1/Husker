@@ -87,6 +87,10 @@ fn app(state: AppState) -> Router {
             get(routes::env_vars::get_env).delete(routes::env_vars::delete_env),
         )
         .route("/api/apps/{id}", delete(routes::apps::delete_app))
+        .route(
+            "/api/apps/{id}/deployments",
+            get(routes::apps::list_deployments),
+        )
         .route("/api/apps/{id}/deploy", post(routes::apps::deploy_app))
         .route("/api/apps/{id}/stop", post(routes::apps::stop_app))
         .route("/api/apps/{id}/restart", post(routes::apps::restart_app))

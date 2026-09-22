@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::extractors::{non_blank, ValidatedJson};
+use crate::extractors::{non_blank, ValidatedJson, ValidatedQuery};
 use crate::routes::projects::Project;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -283,6 +283,153 @@ pub async fn restart_app(
     State(state): State<AppState>,
 ) -> Result<Json<App>, AppError> {
     Ok(Json(crate::deploy::restart(&state, app_id).await?))
+}
+
+#[derive(Deserialize)]
+pub struct PaginationParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeploymentSignal {
+    pub id: i64,
+    pub kind: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeploymentEntry {
+    pub id: i64,
+    pub status: String,
+    pub git_sha: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub log_path: Option<String>,
+    pub signals: Vec<DeploymentSignal>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeploymentsPage {
+    pub data: Vec<DeploymentEntry>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+/// `GET /api/apps/{id}/deployments` — historique paginé des déploiements (HUSKER-25).
+/// 404 si l'app n'existe pas ; app sans déploiement -> 200 + `data: []`.
+///
+/// Check d'existence + requête principale dans **une même transaction** (lecture seule,
+/// jamais commitée explicitement en cas d'erreur -> rollback implicite au drop) : sans ça,
+/// un `DELETE /api/apps/{id}` concurrent entre les deux statements ferait retourner
+/// `200 + []` au lieu de `404` pour une app qui vient de disparaître.
+///
+/// Requête single-pass en 3 CTE : `matched` (deploys de l'app) -> `totals` (leur compte,
+/// toujours 1 ligne) -> `paged` (tri + LIMIT/OFFSET). `totals` est jointe en `CROSS JOIN`
+/// puis `paged`/`deployment_signals` en `LEFT JOIN` : le `total` reste lisible même quand
+/// `offset` dépasse le total et que `paged` ne produit aucune ligne — évite un 2e `SELECT
+/// COUNT(*)` séparé (race possible avec une écriture concurrente, cf. specs /refine).
+/// Dédup des signaux multiples par déploiement par comparaison au dernier élément de `data` :
+/// le tri (`ORDER BY ... paged.id`) garantit que les lignes d'un même déploiement arrivent
+/// contiguës, donc un simple `data.last()` suffit (pas besoin de `HashMap`).
+pub async fn list_deployments(
+    Path(app_id): Path<i64>,
+    State(state): State<AppState>,
+    ValidatedQuery(pagination): ValidatedQuery<PaginationParams>,
+) -> Result<Json<DeploymentsPage>, AppError> {
+    let mut tx = state.pool.begin().await?;
+
+    sqlx::query_scalar!("SELECT id FROM apps WHERE id = ?", app_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let limit = pagination.limit.unwrap_or(20).clamp(1, 100);
+    let offset = pagination.offset.unwrap_or(0);
+
+    let rows = sqlx::query!(
+        r#"
+        WITH matched AS (
+            SELECT id, status, git_sha, started_at, finished_at, log_path
+            FROM deployments
+            WHERE app_id = ?
+        ),
+        totals AS (
+            SELECT COUNT(*) as total FROM matched
+        ),
+        paged AS (
+            SELECT * FROM matched
+            ORDER BY started_at DESC, id DESC
+            LIMIT ? OFFSET ?
+        )
+        SELECT
+            totals.total as "total!: i64",
+            paged.id as "deployment_id?: i64",
+            paged.status as "status?: String",
+            paged.git_sha as "git_sha?: String",
+            paged.started_at as "started_at?: String",
+            paged.finished_at as "finished_at?: String",
+            paged.log_path as "log_path?: String",
+            s.id as "signal_id?: i64",
+            s.kind as "signal_kind?: String",
+            s.message as "signal_message?: String",
+            s.created_at as "signal_created_at?: String"
+        FROM totals
+        LEFT JOIN paged ON 1 = 1
+        LEFT JOIN deployment_signals s ON s.deployment_id = paged.id
+        ORDER BY paged.started_at DESC, paged.id DESC, s.id ASC
+        "#,
+        app_id,
+        limit,
+        offset
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let total = rows
+        .first()
+        .expect("totals CTE produit toujours exactement une ligne de groupe")
+        .total;
+
+    let mut data: Vec<DeploymentEntry> = Vec::new();
+
+    for row in rows {
+        let Some(deployment_id) = row.deployment_id else {
+            continue;
+        };
+
+        if data.last().map(|e: &DeploymentEntry| e.id) != Some(deployment_id) {
+            data.push(DeploymentEntry {
+                id: deployment_id,
+                status: row.status.unwrap_or_default(),
+                git_sha: row.git_sha,
+                started_at: row.started_at.unwrap_or_default(),
+                finished_at: row.finished_at,
+                log_path: row.log_path,
+                signals: Vec::new(),
+            });
+        }
+
+        if let Some(signal_id) = row.signal_id {
+            data.last_mut().unwrap().signals.push(DeploymentSignal {
+                id: signal_id,
+                kind: row.signal_kind.unwrap_or_default(),
+                message: row.signal_message.unwrap_or_default(),
+                created_at: row.signal_created_at.unwrap_or_default(),
+            });
+        }
+    }
+
+    Ok(Json(DeploymentsPage {
+        data,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 #[cfg(test)]
