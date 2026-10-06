@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT log_path FROM deployments WHERE app_id = ? ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "log_path",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e9d4c53df5cc635ffa22f452787556fb8bf5f05988e413bb8e2b2aed7d8f80df"
+}
