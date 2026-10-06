@@ -53,7 +53,7 @@ async fn main() {
 
     let docker = Docker::connect_with_local_defaults().unwrap();
 
-    let state = AppState { pool, docker };
+    let state = AppState::new(pool, docker);
     let app = app(state);
 
     axum::serve(listener, app).await.unwrap();
@@ -113,10 +113,10 @@ mod tests {
     use tower::ServiceExt;
     #[tokio::test]
     async fn test_ping() {
-        let state = AppState {
-            pool: test_pool().await,
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
+        let state = AppState::new(
+            test_pool().await,
+            Docker::connect_with_local_defaults().unwrap(),
+        );
         let app = app(state);
         let request = http::request::Request::builder()
             .uri("/ping")

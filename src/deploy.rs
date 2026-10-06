@@ -27,6 +27,12 @@ use crate::state::AppState;
 /// (`running` si l'app tournait déjà, `failed` sinon). Un échec dans/après `run_new_container`
 /// -> `status = failed` (l'ancien container a déjà été supprimé par `run::run_container`).
 pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
+    // Sérialise les opérations sur cette app (deploy/stop/restart partagent le même container
+    // déterministe) : un double-submit ou deux triggers concurrents ne doivent jamais courir
+    // en parallèle sur la même app. Les autres apps restent indépendantes (verrou par id).
+    let lock = state.app_lock(app_id).await;
+    let _guard = lock.lock().await;
+
     let app = sqlx::query_as!(
         App,
         "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
@@ -392,6 +398,9 @@ async fn reload_app(state: &AppState, app_id: i64) -> Result<App, AppError> {
 /// arrêté (le 304 Docker n'est pas surfacé comme erreur), donc l'état doit être lu via
 /// `inspect_container`. L'inspection donne aussi l'existence (404 -> NotFound).
 pub async fn stop(state: &AppState, app_id: i64) -> Result<StopOutcome, AppError> {
+    let lock = state.app_lock(app_id).await;
+    let _guard = lock.lock().await;
+
     let (app, project) = load_app_and_project(state, app_id).await?;
     let name = run::container_name(&project.name, &app.name);
 
@@ -427,6 +436,9 @@ pub async fn stop(state: &AppState, app_id: i64) -> Result<StopOutcome, AppError
 /// `restart_container` est idempotent côté état : il démarre un container arrêté, bounce un
 /// container vivant. 404 si l'app n'existe pas (DB) OU si son container n'existe pas.
 pub async fn restart(state: &AppState, app_id: i64) -> Result<App, AppError> {
+    let lock = state.app_lock(app_id).await;
+    let _guard = lock.lock().await;
+
     let (app, project) = load_app_and_project(state, app_id).await?;
     let name = run::container_name(&project.name, &app.name);
 

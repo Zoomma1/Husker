@@ -41,10 +41,7 @@ impl TestApp {
 
         let docker = Docker::connect_with_local_defaults().unwrap();
 
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
         let router = crate::app(state);
 
         Self {
