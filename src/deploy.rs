@@ -11,6 +11,7 @@
 pub mod build;
 pub mod digests;
 pub mod git;
+pub mod logs;
 pub mod policy;
 pub mod run;
 
@@ -19,9 +20,12 @@ use crate::routes::apps::App;
 use crate::routes::projects::Project;
 use crate::state::AppState;
 
-/// Déploie une app : `git → build → run`, met `status = running` au succès.
-/// 404 si l'app n'existe pas. Toute erreur git/build/run -> `status = failed` (best-effort)
-/// puis propagation (mappée en 502 par `AppError`).
+/// Déploie une app : `git → build → run`, fait transiter `status` par `pending`/`building`
+/// (HUSKER-26) puis `running` au succès.
+/// 404 si l'app n'existe pas. Un échec avant `run_new_container` (git/policy/digest/build)
+/// laisse l'ancien container intact -> `status` retourne à sa valeur d'avant tentative
+/// (`running` si l'app tournait déjà, `failed` sinon). Un échec dans/après `run_new_container`
+/// -> `status = failed` (l'ancien container a déjà été supprimé par `run::run_container`).
 pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
     let app = sqlx::query_as!(
         App,
@@ -42,12 +46,58 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
     .fetch_one(&state.pool)
     .await?;
 
+    // HUSKER-26 : premier signal visible pour un client qui poll pendant le pipeline.
+    // Propagé avec `?` (pas best-effort) : rien n'a encore été tenté, aucune erreur à masquer.
+    sqlx::query!("UPDATE apps SET status = 'pending' WHERE id = ?", app_id)
+        .execute(&state.pool)
+        .await?;
+
     // Ouvre la ligne `deployments` (HUSKER-21) : une par tentative, `building` tant que
     // le pipeline tourne. Son id rattache les signaux sécu émis pendant le pipeline.
-    let deployment_id = open_deployment(&state.pool, app_id).await?;
+    let (deployment_id, mut log) = match open_deployment(&state.pool, app_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            // Rien n'a encore tourné après le passage à `pending` -> restaure le statut
+            // d'avant tentative. Sans ce rattrapage, un `INSERT INTO deployments` raté
+            // laisserait l'app bloquée sur `pending` indéfiniment (aucun pipeline en vol).
+            let _ = sqlx::query!(
+                "UPDATE apps SET status = ? WHERE id = ?",
+                app.status,
+                app_id
+            )
+            .execute(&state.pool)
+            .await;
+            return Err(e);
+        }
+    };
 
-    match run_pipeline(state, &app, &project, deployment_id).await {
-        Ok(_sha) => {
+    // 1-4. git -> policy -> digest -> build. N'appelle jamais `run::run_container` : un échec
+    // ici ne touche jamais l'ancien container qui tourne (« build d'abord »).
+    let sha = match pull_and_build(state, &app, &project, deployment_id, &mut log).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            // best-effort : on n'écrase pas l'erreur d'origine si les UPDATE échouent aussi.
+            let _ = close_deployment(&state.pool, deployment_id, "failed").await;
+            // HUSKER-26 : l'ancien container n'a pas été touché -> le status reflète Docker,
+            // pas l'échec du pipeline. `app.status` est la valeur lue avant toute tentative
+            // (y compris `stopped` : un redeploy raté sur une app arrêtée ne doit pas la
+            // faire passer à `failed`, elle reste simplement arrêtée).
+            let terminal = match app.status.as_str() {
+                "running" => "running",
+                "stopped" => "stopped",
+                _ => "failed",
+            };
+            let _ = sqlx::query!("UPDATE apps SET status = ? WHERE id = ?", terminal, app_id)
+                .execute(&state.pool)
+                .await;
+            logs::apply_retention(&state.pool, app_id, &logs::logs_root()).await;
+            return Err(e);
+        }
+    };
+
+    // 5. run du nouveau container (stop old + run new dans run_container).
+    match run_new_container(state, &app, &project, &sha, &mut log).await {
+        Ok(()) => {
             // best-effort : le container tourne, une clôture DB ratée ne doit pas le déguiser
             // en 502 ni empêcher le passage de l'app en `running`.
             if let Err(e) = close_deployment(&state.pool, deployment_id, "success").await {
@@ -56,13 +106,16 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
             sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await?;
+            logs::apply_retention(&state.pool, app_id, &logs::logs_root()).await;
         }
         Err(e) => {
-            // best-effort : on n'écrase pas l'erreur d'origine si l'UPDATE échoue aussi.
+            // best-effort : l'ancien container a déjà été supprimé par `run::run_container`,
+            // rien à préserver -> `failed` sans condition.
             let _ = close_deployment(&state.pool, deployment_id, "failed").await;
             let _ = sqlx::query!("UPDATE apps SET status = 'failed' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await;
+            logs::apply_retention(&state.pool, app_id, &logs::logs_root()).await;
             return Err(e);
         }
     }
@@ -79,16 +132,18 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
     Ok(updated)
 }
 
-/// Le pipeline proprement dit. Renvoie le `sha` déployé en cas de succès.
-/// Ordre « build d'abord » : `run::run_container` (qui supprime l'ancien container) n'est
-/// atteint que si git ET build ont réussi.
-async fn run_pipeline(
+/// Étapes 1-4 du pipeline : git -> policy -> digest -> build. Renvoie le `sha` cloné en cas
+/// de succès. N'appelle jamais `run::run_container` -> un échec ici ne touche jamais
+/// l'ancien container qui tourne (HUSKER-26 : le statut terminal en cas d'erreur en dépend).
+async fn pull_and_build(
     state: &AppState,
     app: &App,
     project: &Project,
     deployment_id: i64,
+    log: &mut logs::DeploymentLog,
 ) -> Result<String, AppError> {
     // 1. git clone/pull — git2 est synchrone : on le sort du runtime async via spawn_blocking.
+    log.write_line("[git] clone/pull...");
     let sources_root =
         std::env::var("HUSKER_SOURCES_ROOT").unwrap_or_else(|_| "sources".to_string());
     let dest = git::dest_path(&sources_root, &app.id.to_string());
@@ -99,6 +154,7 @@ async fn run_pipeline(
         tokio::task::spawn_blocking(move || git::clone_or_update(&url, &branch, &dest_for_git))
             .await
             .map_err(|e| AppError::Deploy(format!("git task panicked: {e}")))??;
+    log.write_line(&format!("[git] sha={sha}"));
     sqlx::query!(
         "UPDATE deployments SET git_sha = ? WHERE id = ?",
         sha,
@@ -113,42 +169,85 @@ async fn run_pipeline(
     //    Chaque warning est persisté en `deployment_signals` (ADR-020 : le log seul se perd).
     let base_images = policy::read_base_images(&dest, &app.dockerfile_path)?;
     for warning in policy::check(&base_images, &policy::allowed_registries())? {
-        tracing::warn!(app = %app.name, "supply-chain : {warning}");
-        record_signal(&state.pool, deployment_id, "policy", &warning).await;
+        emit_signal(
+            &state.pool,
+            deployment_id,
+            &app.name,
+            log,
+            "policy",
+            &warning,
+        )
+        .await;
     }
 
     // Puis la détection de dérive : ce que les tags résolvent aujourd'hui vs au deploy
     // précédent. Best-effort — un registry injoignable ne fait pas échouer le deploy.
     for warning in digests::track(&state.pool, &state.docker, app.id, &base_images).await {
-        tracing::warn!(app = %app.name, "supply-chain : {warning}");
-        record_signal(&state.pool, deployment_id, "digest_drift", &warning).await;
+        emit_signal(
+            &state.pool,
+            deployment_id,
+            &app.name,
+            log,
+            "digest_drift",
+            &warning,
+        )
+        .await;
     }
+
+    // HUSKER-26 : à partir d'ici l'app est en train d'être (re)construite -> `building`.
+    // Tout ce qui précède (git, policy, digest) reste sous `pending`.
+    sqlx::query!("UPDATE apps SET status = 'building' WHERE id = ?", app.id)
+        .execute(&state.pool)
+        .await?;
 
     // 3. build de l'image depuis le contexte cloné (build d'abord : un échec ici ne touche
     //    pas le container qui tourne).
+    log.write_line("[build] démarrage...");
     let image = build::image_ref(&project.name, &app.name, &sha);
     let context = build::make_context_targz(&dest)?;
-    build::build_with_buildkit(&state.docker, context, &image, &app.dockerfile_path).await?;
+    build::build_with_buildkit(&state.docker, context, &image, &app.dockerfile_path, log).await?;
+    log.write_line("[build] terminé");
 
+    Ok(sha)
+}
+
+/// Étape 5 du pipeline : run du nouveau container (stop old + run new dans `run_container`).
+/// C'est l'unique point du pipeline qui touche un container existant (`remove_container`
+/// interne à `run::run_container`, avant `create_container`) -> tout échec ici ou après
+/// signifie que l'ancien container a déjà été supprimé (HUSKER-26).
+async fn run_new_container(
+    state: &AppState,
+    app: &App,
+    project: &Project,
+    sha: &str,
+    log: &mut logs::DeploymentLog,
+) -> Result<(), AppError> {
     // 4. env vars depuis la DB.
     let env_rows = sqlx::query!("SELECT key, value FROM env_vars WHERE app_id = ?", app.id)
         .fetch_all(&state.pool)
         .await?;
     let env: Vec<(String, String)> = env_rows.into_iter().map(|r| (r.key, r.value)).collect();
 
-    // 5. run du nouveau container (stop old + run new dans run_container).
+    log.write_line("[run] démarrage container...");
+    let image = build::image_ref(&project.name, &app.name, sha);
     let data_root = std::env::var("HUSKER_DATA_ROOT").unwrap_or_else(|_| "data".to_string());
     let data_abs = run::prepare_data_dir(&data_root, &project.name, &app.name)?;
     let name = run::container_name(&project.name, &app.name);
     let cmd = run::run_cmd(app.run_command.as_deref());
     let config = run::build_container_config(&image, &env, &project.network_name, &data_abs, cmd);
     run::run_container(&state.docker, &name, config).await?;
+    log.write_line("[run] container démarré");
 
-    Ok(sha)
+    Ok(())
 }
 
-/// Ouvre une ligne `deployments` en `building` ; renvoie son id (HUSKER-21).
-async fn open_deployment(pool: &sqlx::SqlitePool, app_id: i64) -> Result<i64, AppError> {
+/// Ouvre une ligne `deployments` en `building` ; renvoie son id (HUSKER-21) + le fichier de
+/// log ouvert pour ce déploiement (HUSKER-23). `log_path` est renseigné dès ce point-là — le
+/// fichier existe même si le déploiement échoue à la toute première étape.
+async fn open_deployment(
+    pool: &sqlx::SqlitePool,
+    app_id: i64,
+) -> Result<(i64, logs::DeploymentLog), AppError> {
     let now = chrono::Utc::now().to_rfc3339();
     let id = sqlx::query!(
         "INSERT INTO deployments (app_id, status, started_at) VALUES (?, 'building', ?)",
@@ -158,7 +257,24 @@ async fn open_deployment(pool: &sqlx::SqlitePool, app_id: i64) -> Result<i64, Ap
     .execute(pool)
     .await?
     .last_insert_rowid();
-    Ok(id)
+
+    let root = logs::logs_root();
+    let log = logs::DeploymentLog::open(&root, id);
+    let log_path = logs::log_path(&root, id).to_string_lossy().into_owned();
+    if let Err(e) = sqlx::query!(
+        "UPDATE deployments SET log_path = ? WHERE id = ?",
+        log_path,
+        id
+    )
+    .execute(pool)
+    .await
+    {
+        // best-effort, comme le reste du suivi HUSKER-23 : le fichier existe déjà sur
+        // disque, seule la colonne DB n'a pas pu être posée.
+        tracing::error!(deployment_id = id, "log_path non persisté : {e}");
+    }
+
+    Ok((id, log))
 }
 
 /// Clôt la ligne `deployments` : `status` final (`success` | `failed`) + `finished_at`.
@@ -177,6 +293,31 @@ async fn close_deployment(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Triplet commun à policy/digest/scan : `tracing::warn!` + ligne de log + persistance
+/// (`record_signal`). Un seul endroit où les trois gestes restent synchronisés — avant cet
+/// helper, chaque appelant les recopiait, avec le risque d'en oublier un en ajoutant un 4e
+/// type de signal.
+async fn emit_signal(
+    pool: &sqlx::SqlitePool,
+    deployment_id: i64,
+    app_name: &str,
+    log: &mut logs::DeploymentLog,
+    signal_kind: &str,
+    warning: &str,
+) {
+    // `signal_kind` détermine tout le reste : le préfixe tracing et le tag du log de
+    // déploiement n'ont jamais besoin de varier indépendamment de lui.
+    let (tracing_prefix, log_tag) = match signal_kind {
+        "policy" => ("supply-chain", "policy"),
+        "digest_drift" => ("supply-chain", "digest"),
+        "cve" => ("cve", "scan"),
+        other => (other, other),
+    };
+    tracing::warn!(app = %app_name, "{tracing_prefix} : {warning}");
+    log.write_line(&format!("[{log_tag}] {warning}"));
+    record_signal(pool, deployment_id, signal_kind, warning).await;
 }
 
 /// Persiste un signal sécu (warning supply-chain, plus tard CVE) rattaché au déploiement.
@@ -514,6 +655,18 @@ mod tests {
     fn set_roots(tmp: &TmpDir) {
         std::env::set_var("HUSKER_SOURCES_ROOT", tmp.path().join("sources"));
         std::env::set_var("HUSKER_DATA_ROOT", tmp.path().join("data"));
+        std::env::set_var("HUSKER_LOGS_ROOT", tmp.path().join("logs"));
+    }
+
+    /// `deployments.log_path` de la dernière ligne pour `app_id`.
+    async fn log_path_of(pool: &SqlitePool, app_id: i64) -> Option<String> {
+        sqlx::query_scalar!(
+            "SELECT log_path FROM deployments WHERE app_id = ? ORDER BY id DESC LIMIT 1",
+            app_id
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     // --- Offline (suite normale) ---
@@ -521,10 +674,10 @@ mod tests {
     #[tokio::test]
     async fn deploy_unknown_app_is_not_found() {
         // Branche 404 : pas de Docker ni de git touchés (retour avant tout I/O).
-        let state = AppState {
-            pool: test_pool().await,
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
+        let state = AppState::new(
+            test_pool().await,
+            Docker::connect_with_local_defaults().unwrap(),
+        );
         let result = deploy(&state, 999_999).await;
         assert!(matches!(result, Err(AppError::NotFound)));
     }
@@ -549,10 +702,7 @@ mod tests {
         )
         .await;
 
-        let state = AppState {
-            pool: pool.clone(),
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
+        let state = AppState::new(pool.clone(), Docker::connect_with_local_defaults().unwrap());
         let result = deploy(&state, app_id).await;
 
         assert!(
@@ -592,10 +742,7 @@ mod tests {
 
         let (project, app, network) = unique_names();
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
+        let state = AppState::new(pool.clone(), Docker::connect_with_local_defaults().unwrap());
 
         let result = deploy(&state, app_id).await;
 
@@ -617,6 +764,107 @@ mod tests {
             signals_of(&pool, app_id).await.is_empty(),
             "aucun signal sans Dockerfile"
         );
+
+        // HUSKER-23 : le log existe (git a réussi avant l'échec) et log_path est posé
+        // dès l'ouverture, même si le pipeline échoue à l'étape suivante.
+        let log_path = log_path_of(&pool, app_id)
+            .await
+            .expect("log_path renseigné dès l'ouverture");
+        let content = fs::read_to_string(&log_path).expect("le fichier de log doit exister");
+        assert!(
+            content.contains(&sha),
+            "le log doit couvrir l'étape git réussie : {content:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_writes_no_log_but_still_fails_correctly_when_logs_root_unwritable() {
+        // HUSKER-23 : une racine de logs non inscriptible (ici : collision avec un fichier
+        // existant, portable) ne doit jamais changer le motif d'échec du déploiement — le
+        // best-effort du log ne doit pas se voir depuis l'extérieur du pipeline.
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+        let bogus_logs_root = tmp.path().join("logs-is-a-file");
+        fs::write(&bogus_logs_root, b"pas un dossier").unwrap();
+        std::env::set_var("HUSKER_LOGS_ROOT", &bogus_logs_root);
+
+        let pool = test_pool().await;
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha = commit_file(&repo, "README.md", "no dockerfile here\n", "init");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState::new(pool.clone(), Docker::connect_with_local_defaults().unwrap());
+
+        let result = deploy(&state, app_id).await;
+
+        // Restaure une racine saine pour ne pas polluer les tests suivants du même process.
+        std::env::set_var("HUSKER_LOGS_ROOT", tmp.path().join("logs"));
+
+        assert!(
+            matches!(result, Err(AppError::Deploy(_))),
+            "même échec (Dockerfile absent) qu'avec une racine de logs saine"
+        );
+        assert_eq!(app_status(&pool, app_id).await, "failed");
+        let rows = deployments_of(&pool, app_id).await;
+        assert_eq!(
+            rows[0].git_sha.as_deref(),
+            Some(sha.as_str()),
+            "le pipeline continue normalement malgré le log en échec"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_deletes_log_files_of_deployments_beyond_the_kept_count() {
+        // HUSKER-23 : rétention par nombre de déploiements conservés (question ouverte #6).
+        // Testée directement contre `logs::apply_retention`, sans repasser par un deploy
+        // Docker/git complet à 25 reprises.
+        let tmp = TmpDir::new();
+        let root = tmp.path().join("logs");
+        fs::create_dir_all(&root).unwrap();
+
+        let pool = test_pool().await;
+        let (project, app, network) = unique_names();
+        let app_id = seed_app(
+            &pool,
+            &project,
+            &network,
+            &app,
+            "https://example.invalid/repo",
+            "main",
+        )
+        .await;
+
+        // 25 déploiements pour cette app, chacun avec son fichier de log sur disque.
+        let mut ids = Vec::new();
+        for _ in 0..25 {
+            let (id, _) = open_deployment(&pool, app_id).await.unwrap();
+            fs::write(logs::log_path(root.to_str().unwrap(), id), b"log").unwrap();
+            ids.push(id);
+        }
+
+        logs::apply_retention(&pool, app_id, root.to_str().unwrap()).await;
+
+        let (kept, deleted): (Vec<_>, Vec<_>) = ids
+            .into_iter()
+            .rev()
+            .enumerate()
+            .partition(|(i, _)| *i < 20);
+        for (_, id) in kept {
+            assert!(
+                logs::log_path(root.to_str().unwrap(), id).exists(),
+                "les 20 déploiements les plus récents gardent leur log (id={id})"
+            );
+        }
+        for (_, id) in deleted {
+            assert!(
+                !logs::log_path(root.to_str().unwrap(), id).exists(),
+                "au-delà du seuil, le log disparaît (id={id})"
+            );
+        }
     }
 
     #[tokio::test]
@@ -636,10 +884,7 @@ mod tests {
 
         let (project, app, network) = unique_names();
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
+        let state = AppState::new(pool.clone(), Docker::connect_with_local_defaults().unwrap());
 
         let result = deploy(&state, app_id).await;
         assert!(
@@ -681,10 +926,7 @@ mod tests {
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
 
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
         let result = deploy(&state, app_id).await;
 
         let container = run::container_name(&project, &app);
@@ -731,6 +973,19 @@ mod tests {
             env.iter().any(|e| e == "HUSKER_GREETING=hello"),
             "env var injectée : {env:?}"
         );
+
+        // HUSKER-23 : le log couvre les trois étapes du pipeline.
+        let log_path = log_path_of(&pool, app_id).await.expect("log_path posé");
+        let log_content = fs::read_to_string(&log_path).expect("le fichier de log doit exister");
+        assert!(
+            log_content.contains(&format!("sha={sha}")),
+            "étape git absente du log"
+        );
+        assert!(
+            log_content.contains("[build]"),
+            "étape build absente du log"
+        );
+        assert!(log_content.contains("[run]"), "étape run absente du log");
     }
 
     #[tokio::test]
@@ -750,10 +1005,7 @@ mod tests {
         let (project, app, network) = unique_names();
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         // Deploy 1.
         let r1 = deploy(&state, app_id).await;
@@ -806,10 +1058,7 @@ mod tests {
         create_project_network(&docker, &network).await;
         // App configurée sur "feature".
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, "feature").await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         let result = deploy(&state, app_id).await;
 
@@ -834,7 +1083,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "Docker+git réels : build raté garde l'ancien container (cargo test -- --ignored)"]
-    async fn build_failure_keeps_previous_container_and_marks_failed() {
+    async fn build_failure_keeps_previous_container_and_stays_running() {
         let _guard = DEPLOY_IT_LOCK.lock().await;
         let docker = Docker::connect_with_local_defaults().unwrap();
         let pool = test_pool().await;
@@ -849,13 +1098,11 @@ mod tests {
         let (project, app, network) = unique_names();
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         // Deploy 1 OK -> container running (sha1).
         let r1 = deploy(&state, app_id).await;
+        let status_before_redeploy = app_status(&pool, app_id).await;
         // On casse le Dockerfile puis on redéploie.
         let sha2 = commit_dockerfile(&repo, BROKEN_DOCKERFILE, "broken");
         let r2 = deploy(&state, app_id).await;
@@ -867,7 +1114,14 @@ mod tests {
 
         r1.expect("deploy 1 ok");
         assert!(r2.is_err(), "le build raté doit faire échouer le redeploy");
-        assert_eq!(status, "failed", "status DB -> failed");
+        // HUSKER-26 : l'ancien container n'a jamais été touché (build d'abord) -> le status
+        // reflète Docker, pas l'échec du pipeline. Invariant explicite avant/après, pas
+        // seulement la valeur finale : un build raté en redeploy ne doit rien changer.
+        assert_eq!(
+            status, status_before_redeploy,
+            "status DB inchangé par un build raté en redeploy"
+        );
+        assert_eq!(status, "running", "status DB reste running");
 
         // HUSKER-21 : l'historique garde les deux tentatives, dans l'ordre.
         let rows = deployments_of(&pool, app_id).await;
@@ -893,6 +1147,148 @@ mod tests {
             Some(build::image_ref(&project, &app, &sha1)),
             "le container intact est bien celui du sha précédent"
         );
+
+        // HUSKER-23 : le log du déploiement raté (2e ligne) contient l'erreur de build,
+        // lisible sans relancer le déploiement.
+        let failed_log_path = log_path_of(&pool, app_id).await.expect("log_path posé");
+        let log_content =
+            fs::read_to_string(&failed_log_path).expect("le fichier de log doit exister");
+        assert!(
+            log_content.contains("[build] échec"),
+            "l'erreur de build doit être dans le log : {log_content:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker+git réels : échec côté run après build OK -> failed, ancien container supprimé (cargo test -- --ignored)"]
+    async fn run_failure_after_successful_build_marks_failed() {
+        // HUSKER-26 : contrairement à un build raté, un échec dans `run_new_container`
+        // survient APRÈS que `remove_container` (interne à `run::run_container`) ait déjà
+        // supprimé l'ancien container -> rien à préserver, `status` doit rester `failed`.
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sha1 = commit_dockerfile(&repo, RUNNING_DOCKERFILE, "good");
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        create_project_network(&docker, &network).await;
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState::new(pool.clone(), docker.clone());
+
+        // Deploy 1 OK -> container running (sha1).
+        let r1 = deploy(&state, app_id).await;
+
+        // Le build va réussir (même Dockerfile) mais `run::run_container` va échouer :
+        // network inexistant -> `create_container` échoue APRÈS que `remove_container`
+        // (stop old) ait déjà supprimé le container sha1.
+        sqlx::query!(
+            "UPDATE projects SET network_name = 'husker-network-does-not-exist'
+             WHERE id = (SELECT project_id FROM apps WHERE id = ?)",
+            app_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let sha2 = commit_dockerfile(&repo, RUNNING_DOCKERFILE, "same content, new commit");
+        let r2 = deploy(&state, app_id).await;
+
+        let container = run::container_name(&project, &app);
+        let inspect = docker.inspect_container(&container, None).await;
+        let status = app_status(&pool, app_id).await;
+        cleanup(&docker, &project, &app, &network, &[&sha1, &sha2]).await;
+
+        r1.expect("deploy 1 ok");
+        assert!(r2.is_err(), "run sur network inexistant doit échouer");
+        assert_eq!(
+            status, "failed",
+            "status DB -> failed : l'ancien container a déjà été supprimé"
+        );
+        // `remove_container` (stop old) a déjà tourné avant l'échec : soit le container a
+        // disparu, soit c'est celui recréé pour sha2 (`create_container` réussit, c'est
+        // `start_container` qui échoue sur le network manquant) -- dans les deux cas
+        // l'ancien container sha1 n'existe plus et rien ne tourne.
+        match inspect {
+            Err(_) => {}
+            Ok(info) => {
+                assert_ne!(
+                    info.config.as_ref().and_then(|c| c.image.as_deref()),
+                    Some(build::image_ref(&project, &app, &sha1).as_str()),
+                    "le container restant ne doit plus être celui de sha1 (ancien) : {info:?}"
+                );
+                assert_ne!(
+                    info.state.as_ref().and_then(|s| s.running),
+                    Some(true),
+                    "aucun container ne doit tourner après cet échec : {info:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Docker+git réels : transitions pending -> building -> terminal observées pendant le pipeline (cargo test -- --ignored)"]
+    async fn deploy_transitions_through_pending_and_building() {
+        let _guard = DEPLOY_IT_LOCK.lock().await;
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let pool = test_pool().await;
+        let tmp = TmpDir::new();
+        set_roots(&tmp);
+
+        let repo = init_repo(&tmp.path().join("repo"));
+        // `RUN sleep 3` ralentit le build assez pour laisser une fenêtre d'observation
+        // réaliste sur `building` (et `pending`, qui couvre git+policy+digest en amont).
+        let sha = commit_dockerfile(
+            &repo,
+            "FROM alpine:3.20\nRUN sleep 3\nCMD [\"sleep\", \"3600\"]\n",
+            "slow",
+        );
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let git_url = tmp.path().join("repo").to_str().unwrap().to_string();
+
+        let (project, app, network) = unique_names();
+        create_project_network(&docker, &network).await;
+        let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
+        let state = AppState::new(pool.clone(), docker.clone());
+
+        let deploy_handle = tokio::spawn(async move { deploy(&state, app_id).await });
+
+        let mut seen = std::collections::HashSet::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            seen.insert(app_status(&pool, app_id).await);
+            if seen.contains("running") || seen.contains("failed") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let result = deploy_handle
+            .await
+            .expect("la tâche deploy ne doit pas paniquer");
+        let final_status = app_status(&pool, app_id).await;
+        let container = run::container_name(&project, &app);
+        let inspect = docker.inspect_container(&container, None).await;
+        cleanup(&docker, &project, &app, &network, &[&sha]).await;
+
+        result.expect("deploy doit réussir");
+        assert!(
+            inspect.is_ok(),
+            "container attendu après un déploiement réussi"
+        );
+        assert_eq!(final_status, "running", "état terminal -> running");
+        assert!(
+            seen.contains("pending"),
+            "status `pending` jamais observé pendant le pipeline : {seen:?}"
+        );
+        assert!(
+            seen.contains("building"),
+            "status `building` jamais observé pendant le pipeline : {seen:?}"
+        );
     }
 
     // --- Stop / restart (HUSKER-14) ---
@@ -914,10 +1310,7 @@ mod tests {
         let (project, app, network) = unique_names();
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         deploy(&state, app_id).await.expect("deploy ok");
         let outcome = stop(&state, app_id).await;
@@ -960,10 +1353,7 @@ mod tests {
         let (project, app, network) = unique_names();
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         deploy(&state, app_id).await.expect("deploy ok");
         stop(&state, app_id).await.expect("1er stop ok");
@@ -994,10 +1384,7 @@ mod tests {
         let (project, app, network) = unique_names();
         create_project_network(&docker, &network).await;
         let app_id = seed_app(&pool, &project, &network, &app, &git_url, &branch).await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker: docker.clone(),
-        };
+        let state = AppState::new(pool.clone(), docker.clone());
 
         deploy(&state, app_id).await.expect("deploy ok");
         stop(&state, app_id).await.expect("stop ok");
@@ -1034,10 +1421,7 @@ mod tests {
             "main",
         )
         .await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker,
-        };
+        let state = AppState::new(pool.clone(), docker);
 
         let result = stop(&state, app_id).await;
         assert!(
@@ -1062,10 +1446,7 @@ mod tests {
             "main",
         )
         .await;
-        let state = AppState {
-            pool: pool.clone(),
-            docker,
-        };
+        let state = AppState::new(pool.clone(), docker);
 
         let result = restart(&state, app_id).await;
         assert!(
