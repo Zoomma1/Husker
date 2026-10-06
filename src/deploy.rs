@@ -14,6 +14,7 @@ pub mod git;
 pub mod logs;
 pub mod policy;
 pub mod run;
+pub mod scan;
 
 use crate::errors::AppError;
 use crate::routes::apps::App;
@@ -112,6 +113,24 @@ pub async fn deploy(state: &AppState, app_id: i64) -> Result<App, AppError> {
             sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
                 .execute(&state.pool)
                 .await?;
+
+            // 6. scan CVE de l'image buildée (HUSKER-16), volontairement après la bascule
+            // en `running` : reporting-first, le résultat ne peut jamais influencer le
+            // succès du deploy -> pas de raison de retarder la mise en ligne du container
+            // pour l'attendre.
+            let image = build::image_ref(&project.name, &app.name, &sha);
+            for warning in scan::scan(&state.docker, &image).await {
+                emit_signal(
+                    &state.pool,
+                    deployment_id,
+                    &app.name,
+                    &mut log,
+                    "cve",
+                    &warning,
+                )
+                .await;
+            }
+
             logs::apply_retention(&state.pool, app_id, &logs::logs_root()).await;
         }
         Err(e) => {
