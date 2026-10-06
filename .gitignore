@@ -3,3 +3,5 @@
 state.db
 CLAUDE.md
 sources/
+logs/
+graphify-out/

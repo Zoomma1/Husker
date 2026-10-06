@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE apps SET status = 'pending' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8d9c4737e48d605b8294ac54b4fd1c5e6254cea1d447e185e0f0f0ab1134fa0b"
+}

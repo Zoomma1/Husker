@@ -39,7 +39,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test (offline, #[ignore] exclus)
-        run: cargo test
+        # --test-threads=1 : HUSKER_DATA_ROOT/SOURCES_ROOT/LOGS_ROOT sont des env vars
+        # globales au process ; routes/apps.rs lit HUSKER_DATA_ROOT sans le verrou
+        # ENV_ROOTS_LOCK que deploy.rs utilise pour les muter -> race inter-tests en
+        # parallèle (flaky, non reproductible en local). Coût négligeable (~2s de plus).
+        run: cargo test -- --test-threads=1
 
   # E2E : pipeline réel (git + Docker). Ne tourne que si le gate rapide est vert.
   e2e:
@@ -55,4 +59,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo test -- --ignored (deploy / stop / restart / pipeline_e2e)
-        run: cargo test -- --ignored
+        # Même race que le job `check` (voir son commentaire) : ces tests mutent les
+        # mêmes env vars globales.
+        run: cargo test -- --ignored --test-threads=1

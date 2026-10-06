@@ -4,6 +4,7 @@
 //! paramétrable (honore `app.dockerfile_path`). Erreurs de transport bollard mappées
 //! vers `AppError::Docker` (→ 502) ; un build qui échoue côté contenu -> `AppError::Deploy`.
 
+use super::logs::DeploymentLog;
 use crate::errors::AppError;
 use bollard::models::{BuildInfo, BuildInfoAux};
 use bollard::query_parameters::{BuildImageOptionsBuilder, BuilderVersion};
@@ -29,12 +30,14 @@ pub fn make_context_targz(dir: &Path) -> Result<Vec<u8>, AppError> {
     inner(dir).map_err(|e| AppError::Deploy(format!("build context: {e}")))
 }
 
-/// Build via BuildKit + log du progress (tracing). Échec remonté en `Err`, jamais de panic.
+/// Build via BuildKit + log du progress (tracing + fichier de déploiement, HUSKER-23).
+/// Échec remonté en `Err`, jamais de panic.
 pub async fn build_with_buildkit(
     docker: &Docker,
     context: Vec<u8>,
     image_ref: &str,
     dockerfile_path: &str,
+    log: &mut DeploymentLog,
 ) -> Result<(), AppError> {
     // BuildKit corrèle un build à une session (variante providerless = sans secrets/ssh).
     let session = format!("husker-{}", uuid::Uuid::new_v4());
@@ -53,12 +56,21 @@ pub async fn build_with_buildkit(
 
     while let Some(item) = stream.next().await {
         // Erreur de transport/build -> AppError::Docker (via #[from]), pas un panic.
+        // C'est le chemin que prend BuildKit pour un `RUN` qui sort non-zéro (pas
+        // `error_detail`, qui lui ne s'observe qu'en pratique côté erreurs de daemon).
+        let item = match item {
+            Ok(info) => info,
+            Err(e) => {
+                log.write_line(&format!("[build] échec : {e}"));
+                return Err(e.into());
+            }
+        };
         let BuildInfo {
             aux,
             stream,
             error_detail,
             ..
-        } = item?;
+        } = item;
 
         if let Some(BuildInfoAux::BuildKit(status)) = aux {
             for v in status.vertexes {
@@ -68,20 +80,27 @@ pub async fn build_with_buildkit(
                 }
                 if seen.insert(format!("{}:{done}", v.digest)) {
                     tracing::debug!(step = %v.name, done, "build step");
+                    log.write_line(&format!(
+                        "[build] {} — {}",
+                        v.name,
+                        if done { "done" } else { "started" }
+                    ));
                 }
             }
-            for log in status.logs {
-                tracing::debug!("{}", String::from_utf8_lossy(&log.msg));
+            for entry in status.logs {
+                let line = String::from_utf8_lossy(&entry.msg);
+                tracing::debug!("{line}");
+                log.write_line(&line);
             }
         } else if let Some(s) = stream {
             tracing::debug!("{s}");
+            log.write_line(&s);
         }
 
         if let Some(err) = error_detail {
-            return Err(AppError::Deploy(format!(
-                "build échoué : {}",
-                err.message.unwrap_or_default()
-            )));
+            let message = err.message.unwrap_or_default();
+            log.write_line(&format!("[build] échec : {message}"));
+            return Err(AppError::Deploy(format!("build échoué : {message}")));
         }
     }
     Ok(())
@@ -124,8 +143,21 @@ mod tests {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let img = image_ref("test", "hello", "deadbeef");
         let ctx = make_context_targz(Path::new("tests/fixtures/build-context")).unwrap();
-        build_with_buildkit(&docker, ctx, &img, "Dockerfile")
+
+        let tmp = std::env::temp_dir().join(format!("husker-build-ut-{}", uuid::Uuid::new_v4()));
+        let mut log = DeploymentLog::open(tmp.to_str().unwrap(), 1);
+
+        build_with_buildkit(&docker, ctx, &img, "Dockerfile", &mut log)
             .await
             .unwrap();
+
+        let content =
+            std::fs::read_to_string(super::super::logs::log_path(tmp.to_str().unwrap(), 1))
+                .unwrap();
+        assert!(
+            !content.is_empty(),
+            "le progress du build doit atterrir dans le fichier de log"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

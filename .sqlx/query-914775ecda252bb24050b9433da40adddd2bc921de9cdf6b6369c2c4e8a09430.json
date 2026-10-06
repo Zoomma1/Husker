@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE projects SET network_name = 'husker-network-does-not-exist'\n             WHERE id = (SELECT project_id FROM apps WHERE id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "914775ecda252bb24050b9433da40adddd2bc921de9cdf6b6369c2c4e8a09430"
+}
