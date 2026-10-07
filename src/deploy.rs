@@ -374,7 +374,10 @@ pub enum StopOutcome {
 }
 
 /// Charge l'app (404 si absente) et son projet (network / nom). Helper partagé stop/restart.
-async fn load_app_and_project(state: &AppState, app_id: i64) -> Result<(App, Project), AppError> {
+pub(crate) async fn load_app_and_project(
+    state: &AppState,
+    app_id: i64,
+) -> Result<(App, Project), AppError> {
     let app = sqlx::query_as!(
         App,
         "SELECT id, project_id, name, git_url, git_branch, dockerfile_path, build_command, run_command, created_at, exposed, public_domain, status
@@ -423,13 +426,11 @@ pub async fn stop(state: &AppState, app_id: i64) -> Result<StopOutcome, AppError
     let (app, project) = load_app_and_project(state, app_id).await?;
     let name = run::container_name(&project.name, &app.name);
 
-    let info = match state.docker.inspect_container(&name, None).await {
-        Ok(info) => info,
-        Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 404, ..
-        }) => return Err(AppError::NotFound),
-        Err(e) => return Err(AppError::Docker(e)),
-    };
+    let info = state
+        .docker
+        .inspect_container(&name, None)
+        .await
+        .map_err(map_container_absent_to_not_found)?;
 
     let running = info.state.and_then(|s| s.running).unwrap_or(false);
     if !running {
@@ -461,24 +462,30 @@ pub async fn restart(state: &AppState, app_id: i64) -> Result<App, AppError> {
     let (app, project) = load_app_and_project(state, app_id).await?;
     let name = run::container_name(&project.name, &app.name);
 
-    match state
+    state
         .docker
         .restart_container(
             &name,
             None::<bollard::query_parameters::RestartContainerOptions>,
         )
         .await
-    {
-        Ok(_) => {
-            sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
-                .execute(&state.pool)
-                .await?;
-            reload_app(state, app_id).await
-        }
-        Err(bollard::errors::Error::DockerResponseServerError {
+        .map_err(map_container_absent_to_not_found)?;
+
+    sqlx::query!("UPDATE apps SET status = 'running' WHERE id = ?", app_id)
+        .execute(&state.pool)
+        .await?;
+    reload_app(state, app_id).await
+}
+
+/// Mapping bollard partagé par toutes les opérations qui touchent un container déjà censé
+/// exister (`stop`/`restart`/logs) : container absent -> 404, le reste -> 502. Centralisé pour
+/// que les trois routes restent alignées sur le même contrat d'erreur (cf. code-review HUSKER-24).
+pub(crate) fn map_container_absent_to_not_found(err: bollard::errors::Error) -> AppError {
+    match err {
+        bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
-        }) => Err(AppError::NotFound),
-        Err(e) => Err(AppError::Docker(e)),
+        } => AppError::NotFound,
+        e => AppError::Docker(e),
     }
 }
 

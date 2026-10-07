@@ -629,6 +629,183 @@ async fn test_list_deployments_malformed_query_param_returns_json_error() {
     assert!(body.get("error").is_some(), "body: {:?}", body);
 }
 
+// --- HUSKER-24 : GET /api/apps/{id}/logs (WebSocket) ---
+//
+// `WebSocketUpgrade` exige une vraie connexion TCP (hyper pose l'extension `OnUpgrade`
+// au moment de l'upgrade réel) : impossible à exercer via `tower::ServiceExt::oneshot`
+// (in-memory, pas de connexion). Toute la route passe donc par un vrai listener — réseau,
+// donc #[ignore] (ADR-015), à lancer via `cargo test -- --ignored`.
+
+/// Démarre le router de `ctx` sur un vrai TCP listener (port éphémère) et renvoie son adresse.
+/// Le serveur tourne dans une tâche détachée : elle meurt avec le process de test.
+async fn spawn_real_server(ctx: &TestApp) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = ctx.router.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    addr
+}
+
+/// Statut HTTP de la réponse quand le handshake WS échoue (upgrade refusé avant le 101).
+fn http_status_of_failed_handshake(
+    err: tokio_tungstenite::tungstenite::Error,
+) -> axum::http::StatusCode {
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(response) => response.status(),
+        other => panic!("attendu Error::Http(status), reçu : {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "upgrade WS réel : nécessite une vraie connexion TCP (cargo test -- --ignored)"]
+async fn stream_logs_app_not_found_errors_before_upgrade() {
+    let ctx = TestApp::new().await;
+    let addr = spawn_real_server(&ctx).await;
+
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/api/apps/9999999/logs"))
+        .await
+        .expect_err("app inexistante -> pas d'upgrade");
+
+    assert_eq!(http_status_of_failed_handshake(err), 404);
+}
+
+#[tokio::test]
+#[ignore = "upgrade WS réel + appel Docker (cargo test -- --ignored)"]
+async fn stream_logs_app_without_container_errors_before_upgrade() {
+    // App posée en DB sans jamais avoir été déployée -> pas de container -> 404, même contrat
+    // que `stop`/`restart` pour le même cas (`map_container_absent_to_not_found`, revue HUSKER-24).
+    let ctx = TestApp::new().await;
+    let (_project_id, app_id) = ctx.with_app().await;
+    let addr = spawn_real_server(&ctx).await;
+
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/api/apps/{app_id}/logs"))
+        .await
+        .expect_err("app sans container -> pas d'upgrade");
+
+    assert_eq!(http_status_of_failed_handshake(err), 404);
+}
+
+#[tokio::test]
+#[ignore = "Docker+WS réels : container qui log en live (cargo test -- --ignored)"]
+async fn stream_logs_sends_history_then_follows_live_output_and_closes_on_stop() {
+    use bollard::models::ContainerCreateBody;
+    use bollard::query_parameters::{
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
+    };
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let ctx = TestApp::new().await;
+    let (project_id, app_id) = ctx.with_app().await;
+    let project_name: String =
+        sqlx::query_scalar!("SELECT name FROM projects WHERE id = ?", project_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    let app_name: String = sqlx::query_scalar!("SELECT name FROM apps WHERE id = ?", app_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+    let container_name = crate::deploy::run::container_name(&project_name, &app_name);
+
+    // Image déjà présente localement dans la plupart des runs (les e2e deploy la buildent
+    // par-dessus alpine) ; on la pull explicitement pour que ce test soit autonome.
+    let mut pull = ctx.docker.create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image("alpine")
+                .tag("3.20")
+                .build(),
+        ),
+        None,
+        None,
+    );
+    while pull.next().await.is_some() {}
+
+    let config = ContainerCreateBody {
+        image: Some("alpine:3.20".to_string()),
+        cmd: Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo boot; i=0; while true; do i=$((i+1)); echo live-$i; sleep 1; done".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let opts = CreateContainerOptionsBuilder::default()
+        .name(&container_name)
+        .build();
+    ctx.docker
+        .create_container(Some(opts), config)
+        .await
+        .unwrap();
+    ctx.docker
+        .start_container(
+            &container_name,
+            None::<bollard::query_parameters::StartContainerOptions>,
+        )
+        .await
+        .unwrap();
+    // Laisser le temps à `boot` d'être écrit avant de se connecter (historique non vide).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let addr = spawn_real_server(&ctx).await;
+    let (mut ws, _response) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/apps/{app_id}/logs"))
+            .await
+            .expect("app avec container running -> upgrade accepté");
+
+    let mut lines = Vec::new();
+    let saw_history_then_live = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(Ok(msg)) = ws.next().await {
+            if let WsMessage::Text(text) = msg {
+                lines.push(text.to_string());
+                if lines.iter().any(|l| l.contains("boot"))
+                    && lines.iter().any(|l| l.contains("live-"))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .expect("timeout en attendant historique + live");
+    assert!(
+        saw_history_then_live,
+        "historique (`boot`) puis suivi live (`live-`) attendus, reçu : {lines:?}"
+    );
+
+    // Stop du container -> le stream bollard se termine -> le serveur ferme le WS proprement.
+    ctx.docker
+        .stop_container(
+            &container_name,
+            None::<bollard::query_parameters::StopContainerOptions>,
+        )
+        .await
+        .unwrap();
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMessage::Close(_))) | None => return true,
+                Some(Ok(_)) => continue, // dernières lignes de log avant la fermeture
+                Some(Err(_)) => return true,
+            }
+        }
+    })
+    .await
+    .expect("timeout en attendant la fermeture du WS après stop");
+    assert!(
+        closed,
+        "le WS doit se fermer proprement après l'arrêt du container"
+    );
+
+    let rm = RemoveContainerOptionsBuilder::default().force(true).build();
+    let _ = ctx.docker.remove_container(&container_name, Some(rm)).await;
+}
+
 #[test]
 fn is_safe_path_segment_rejects_traversal() {
     // Garde anti-échappement du data root dans destroy_app (#1 code-review HUSKER-17).
