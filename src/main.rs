@@ -91,6 +91,7 @@ fn app(state: AppState) -> Router {
             "/api/apps/{id}/deployments",
             get(routes::apps::list_deployments),
         )
+        .route("/api/apps/{id}/logs", get(routes::apps::stream_app_logs))
         .route("/api/apps/{id}/deploy", post(routes::apps::deploy_app))
         .route("/api/apps/{id}/stop", post(routes::apps::stop_app))
         .route("/api/apps/{id}/restart", post(routes::apps::restart_app))

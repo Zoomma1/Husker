@@ -2,11 +2,13 @@ use crate::errors::AppError;
 use crate::extractors::{non_blank, ValidatedJson, ValidatedQuery};
 use crate::routes::projects::Project;
 use crate::state::AppState;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bollard::query_parameters::RemoveContainerOptionsBuilder;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -430,6 +432,88 @@ pub async fn list_deployments(
         limit,
         offset,
     }))
+}
+
+/// `GET /api/apps/{id}/logs` — upgrade WebSocket, streame les logs runtime du container
+/// (stdout+stderr, historique puis live) via l'API logs de `bollard` (HUSKER-24).
+/// 404 si l'app n'existe pas OU si elle n'a pas (ou plus) de container — même contrat que
+/// `stop`/`restart` (`map_container_absent_to_not_found`). Erreur renvoyée avant l'upgrade,
+/// jamais après (pas de 500 une fois le WS ouvert).
+pub async fn stream_app_logs(
+    Path(app_id): Path<i64>,
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    // Lock tenu pendant lookup + inspect (comme `stop`/`restart`) pour éviter qu'un
+    // redeploy/restart concurrent recrée le container sous le même nom entre la vérification
+    // et le démarrage effectif du stream (#1 code-review HUSKER-24).
+    let lock = state.app_lock(app_id).await;
+    let guard = lock.lock().await;
+
+    let (app, project) = crate::deploy::load_app_and_project(&state, app_id).await?;
+    let name = crate::deploy::run::container_name(&project.name, &app.name);
+
+    // Inspecter avant d'ouvrir le stream (lesson projet 2026-06-27) : décide si l'upgrade est
+    // possible avant de le faire, plutôt que de découvrir un container absent après coup.
+    state
+        .docker
+        .inspect_container(&name, None)
+        .await
+        .map_err(crate::deploy::map_container_absent_to_not_found)?;
+
+    drop(guard); // ne pas tenir le lock pendant toute la durée du stream (stop/restart doivent rester possibles)
+
+    Ok(ws.on_upgrade(move |socket| async move {
+        stream_container_logs(&state, &name, socket).await;
+    }))
+}
+
+/// Boucle de relais bollard -> WebSocket : historique puis follow, jusqu'à ce que l'une des
+/// trois conditions de fin survienne — container stoppé (stream bollard se termine), client
+/// déconnecté (`send` échoue OU un message/close est reçu du client), ou keepalive qui échoue.
+/// `select!` sur les trois à la fois : sans lire le socket en continu, un client parti pendant
+/// un creux de logs ne serait détecté qu'au prochain `send`, qui peut ne jamais arriver
+/// (#2 code-review HUSKER-24) — d'où le bras `socket.recv()`.
+async fn stream_container_logs(state: &AppState, container_name: &str, mut socket: WebSocket) {
+    let options =
+        crate::docker::logs::tail_then_follow_options(crate::docker::logs::DEFAULT_TAIL_LINES);
+    let mut stream = state.docker.logs(container_name, Some(options));
+    // Ping périodique : sans trafic applicatif pendant un creux, un proxy/LB avec idle-timeout
+    // coupe la connexion sans que personne ne le sache (#4 code-review HUSKER-24).
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+    keepalive.tick().await; // le premier tick est immédiat, pas un vrai intervalle
+
+    loop {
+        tokio::select! {
+            item = stream.next() => {
+                match item {
+                    Some(Ok(output)) => {
+                        if socket.send(Message::Text(output.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(container = %container_name, error = %e, "logs stream interrompu");
+                        break;
+                    }
+                    None => break, // container stoppé -> stream bollard terminé proprement
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {} // ping/pong déjà géré par axum, reste ignoré
+                }
+            }
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 #[cfg(test)]
