@@ -699,13 +699,11 @@ async fn stream_logs_sends_history_then_follows_live_output_and_closes_on_stop()
 
     let ctx = TestApp::new().await;
     let (project_id, app_id) = ctx.with_app().await;
-    let project_name: String = sqlx::query_scalar!(
-        "SELECT name FROM projects WHERE id = ?",
-        project_id
-    )
-    .fetch_one(&ctx.pool)
-    .await
-    .unwrap();
+    let project_name: String =
+        sqlx::query_scalar!("SELECT name FROM projects WHERE id = ?", project_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
     let app_name: String = sqlx::query_scalar!("SELECT name FROM apps WHERE id = ?", app_id)
         .fetch_one(&ctx.pool)
         .await
@@ -799,7 +797,10 @@ async fn stream_logs_sends_history_then_follows_live_output_and_closes_on_stop()
     })
     .await
     .expect("timeout en attendant la fermeture du WS après stop");
-    assert!(closed, "le WS doit se fermer proprement après l'arrêt du container");
+    assert!(
+        closed,
+        "le WS doit se fermer proprement après l'arrêt du container"
+    );
 
     let rm = RemoveContainerOptionsBuilder::default().force(true).build();
     let _ = ctx.docker.remove_container(&container_name, Some(rm)).await;
